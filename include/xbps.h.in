@@ -42,7 +42,9 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+/** Maximal allowed length of rootdir in bytes, including terminating null. */
 #define XBPS_MAXPATH	512
+/** Maximal allowed length of pkgname in bytes, including terminating null. */
 #define XBPS_NAME_SIZE	64
 
 /**

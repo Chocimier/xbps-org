@@ -26,7 +26,14 @@
 #ifndef _XBPS_REPODB_DEFS_H_
 #define _XBPS_REPODB_DEFS_H_
 
+#ifndef __UNCONST
+#define __UNCONST(a)    ((void *)(unsigned long)(const void *)(a))
+#endif
+
 /* Form purge.c */
 int purge_repos(struct xbps_handle *, int, char *[], bool);
+
+/* index.c */
+int index_repos(struct xbps_handle *xhp, int argc, char *argv[]);
 
 #endif /* !_XBPS_REPODB_DEFS_H_ */

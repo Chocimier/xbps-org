@@ -74,7 +74,7 @@ repodata_commit(struct xbps_handle *xhp, const char *repodir,
 	xbps_object_iterator_release(iter);
 
 	/*
-	 * throw away all unused shlibs
+	 * collect users of old shlibs
 	 */
 	iter = xbps_dictionary_iterator(idx);
 	while ((keysym = xbps_object_iterator_next(iter))) {
