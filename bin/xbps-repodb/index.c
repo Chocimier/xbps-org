@@ -5,6 +5,11 @@
 #include "defs.h"
 #include "uthash.h"
 
+struct repolock_t {
+	int fd;
+	char *name;
+};
+
 struct package_t {
 	const char *pkgver;
 	xbps_array_t deps;
@@ -12,6 +17,7 @@ struct package_t {
 	xbps_array_t shlib_requires;
 	xbps_array_t shlib_provides;
 	xbps_array_t provides;
+	xbps_dictionary_t dict;
 	int repo;
 };
 
@@ -36,6 +42,7 @@ struct repos_state_t {
 	 * where key is pkgname of real package, value is pkgpattern of virtual it depends on
 	 */
 	xbps_dictionary_t virtual_users;
+	int repos_count;
 	struct xbps_repo **repos;
 	struct xbps_handle *xhp;
 };
@@ -103,6 +110,8 @@ package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) 
 	package->shlib_provides = xbps_dictionary_get(pkg, "shlib-provides");
 	package->provides = xbps_dictionary_get(pkg, "provides");
 	package->repo = repo_serial;
+	//TODO arrays above are seem redundant now
+	package->dict = xbps_dictionary_copy(pkg);
 }
 
 static void
@@ -222,9 +231,9 @@ build_graph(struct repos_state_t *graph) {
 			xbps_array_get_cstring_nocopy(curr_node->proposed.provides, i, &virtual);
 			ok = xbps_pkg_name(virtual_pkgname, sizeof virtual_pkgname, virtual);
 			if (ok) {
-				xbps_dbg_printf(graph->xhp, "package '%s' provides virtual '%s' pkgname '%s'\n", curr_node->pkgname, virtual, virtual_pkgname);
+				xbps_dbg_printf(graph->xhp, "virtual '%s' (%s) provided by '%s'\n", virtual_pkgname, virtual, curr_node->pkgname);
 			} else {
-				xbps_dbg_printf(graph->xhp, "package '%s' provides '%s' that is not valid pkgver, ignoring\n", curr_node->pkgname, virtual);
+				xbps_dbg_printf(graph->xhp, "invalid virtual pkgver '%s' provided by package '%s', ignoring\n", virtual, curr_node->pkgname);
 				continue;
 			}
 			providers = get_possibly_new_dictionary(graph->virtual_providers, owned_string(virtual_pkgname));
@@ -259,7 +268,7 @@ build_graph(struct repos_state_t *graph) {
 			}
 			virtual_providers = xbps_dictionary_get(graph->virtual_providers, depname);
 			if (virtual_providers) {
-				xbps_array_add(get_possibly_new_dictionary(graph->virtual_users, depname), curr_node->pkgname, deppattern);
+				xbps_dictionary_set_cstring_nocopy(get_possibly_new_dictionary(graph->virtual_users, depname), curr_node->pkgname, deppattern);
 				continue;
 			}
 			xbps_dbg_printf(graph->xhp, "package '%s' depends on unreachable '%s' (%s)\n", curr_node->pkgname, depname, deppattern);
@@ -267,9 +276,13 @@ build_graph(struct repos_state_t *graph) {
 		}
 	}
 
-	if ((rv = verify_graph(graph))) {
+	if (rv) {
 		return rv;
 	}
+
+	//if ((rv = verify_graph(graph))) {
+		//return rv;
+	//}
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
 		curr_node->assured = curr_node->proposed;
 		memset(&curr_node->proposed, 0, sizeof curr_node->proposed);
@@ -344,32 +357,93 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_
 	return 0;
 }
 
+static int write_repos(struct repos_state_t *graph, const char *compression, char *repos[]) {
+	xbps_dictionary_t* dictionaries = NULL;
+	int rv = 0;
+
+	dictionaries = calloc(graph->repos_count, sizeof *dictionaries);
+	if (!dictionaries) {
+		fprintf(stderr, "failed to allocate memory\n");
+		return 1;
+	}
+	for (int i = 0; i < graph->repos_count; ++i) {
+		dictionaries[i] = xbps_dictionary_create();
+		if (!dictionaries[i]) {
+			fprintf(stderr, "failed to allocate memory\n");
+			rv = 1;
+			goto exit;
+		}
+	}
+	for (struct node_t *node = graph->nodes; node; node = node->hh.next) {
+		if (node->assured.dict) {
+			xbps_dictionary_set(dictionaries[node->assured.repo], node->pkgname, node->assured.dict);
+		}
+	}
+	// make flushing atomic?
+	for (int i = 0; i < graph->repos_count; ++i) {
+		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], graph->repos[i]->idxmeta, compression);
+	}
+exit:
+	free(dictionaries);
+	return rv;
+}
+
 int
-index_repos(struct xbps_handle *xhp, int argc, char *argv[])
+index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *argv[])
 {
+	int rv = 0;
 	struct xbps_repo *current_repo;
 	struct repos_state_t graph = {0};
+	struct repolock_t *locks = NULL;
+	int inconsistent = -1;
 	graph.shlib_providers = xbps_dictionary_create();
 	graph.shlib_users = xbps_dictionary_create();
 	graph.virtual_providers = xbps_dictionary_create();
 	graph.virtual_users = xbps_dictionary_create();
-	graph.repos = calloc(argc, sizeof *graph.repos);
+	graph.repos_count = argc;
+	graph.repos = calloc(graph.repos_count, sizeof *graph.repos);
 	graph.xhp = xhp;
-	for (int i = 0; i < argc; ++i) {
+	locks = calloc(graph.repos_count, sizeof *locks);
+	for (int i = 0; i < graph.repos_count; ++i) {
 		const char *path = argv[i];
-		//xbps_repo_lock();
+		bool locked = xbps_repo_lock(xhp, path, &locks[i].fd, &locks[i].name);
+		if (!locked) {
+			rv = 1;
+			goto exit;
+		}
 		current_repo = xbps_repo_public_open(xhp, path);
 		if (current_repo == NULL) {
-			fprintf(stderr, "repo '%s' failed to load\n", path);
-			free_owned_strings();
-			exit(EXIT_FAILURE);
+			fprintf(stderr, "repo '%s' failed to open\n", path);
+			rv = 1;
+			goto exit;
 		}
-		load_repo(&graph, current_repo, i);
+		rv = load_repo(&graph, current_repo, i);
+		if (rv) {
+			fprintf(stderr, "can't load '%s' repo into graph, exiting\n", path);
+			goto exit;
+		}
 	}
-	build_graph(&graph);
+	rv = build_graph(&graph);
+	if (rv) {
+		fprintf(stderr, "can't initialize graph, exiting\n");
+		goto exit;
+	}
 	(void) print_state;
-	verify_graph(&graph);
-
+	inconsistent = false; // verify_graph(&graph);
+	if (inconsistent) {
+		fprintf(stderr, "inconsistent graph, exiting\n");
+		rv = 1;
+	} else {
+		rv = write_repos(&graph, compression, argv);
+	}
+exit:
+	for (int i = graph.repos_count - 1; i >= 0; --i) {
+		if (locks[i].fd) {
+			xbps_repo_unlock(locks[i].fd, locks[i].name);
+		}
+	}
+	free(locks);
+	free(graph.repos);
 	free_owned_strings();
-	return 0;
+	return rv;
 }

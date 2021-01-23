@@ -31,9 +31,9 @@
 #endif
 
 /* Form purge.c */
-int purge_repos(struct xbps_handle *, int, char *[], bool);
+int purge_repos(struct xbps_handle*, int, char*[], bool);
 
 /* index.c */
-int index_repos(struct xbps_handle *xhp, int argc, char *argv[]);
+int index_repos(struct xbps_handle*, const char*, int, char*[]);
 
 #endif /* !_XBPS_REPODB_DEFS_H_ */
