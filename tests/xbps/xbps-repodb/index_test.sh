@@ -67,6 +67,8 @@ nonexistent_requires_head() {
 }
 
 nonexistent_requires_body() {
+	atf_expect_fail "Not implemented"
+
 	stagedata=$(xbps-uhelper arch)-stagedata
 	mkdir -p some_repo pkg root
 	touch pkg/file00
@@ -100,6 +102,8 @@ library_advanced_head() {
 }
 
 library_advanced_body() {
+	atf_expect_fail "Not implemented"
+
 	stagedata=$(xbps-uhelper arch)-stagedata
 	mkdir -p some_repo pkg root
 	touch pkg/file00
@@ -168,6 +172,8 @@ library_split_head() {
 }
 
 library_split_body() {
+	atf_expect_fail "Not implemented"
+
 	stagedata=$(xbps-uhelper arch)-stagedata
 	mkdir -p some_repo pkg root
 	touch pkg/file00
