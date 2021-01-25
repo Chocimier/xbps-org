@@ -5,6 +5,11 @@
 #include "defs.h"
 #include "uthash.h"
 
+struct hash_str_holder_t {
+	char *str;
+	UT_hash_handle hh;
+};
+
 struct repolock_t {
 	int fd;
 	char *name;
@@ -22,7 +27,7 @@ struct package_t {
 };
 
 struct node_t {
-	const char *pkgname;
+	char *pkgname;
 	struct package_t assured;
 	struct package_t proposed;
 	UT_hash_handle hh;
@@ -71,33 +76,31 @@ get_possibly_new_dictionary(xbps_dictionary_t dict, const char *key) {
 	return member;
 }
 
-static xbps_dictionary_t owned_strings_container = NULL;
+static struct hash_str_holder_t *owned_strings_container = NULL;
 
-static const char *
+static char *
 owned_string(const char *content) {
-	const char *owned = NULL;
-	if (owned_strings_container == NULL) {
-		owned_strings_container = xbps_dictionary_create();
+	struct hash_str_holder_t *holder = NULL;
+	size_t len = strlen(content);
+
+	HASH_FIND(hh, owned_strings_container, content, len, holder);
+	if (!holder) {
+		holder = calloc(1, sizeof *holder);
+		holder->str = strdup(content);
+		HASH_ADD_KEYPTR(hh, owned_strings_container, holder->str, len, holder);
 	}
-	if (xbps_dictionary_get_cstring_nocopy(owned_strings_container, content, &owned)) {
-		return owned;
-	}
-	owned = strdup(content);
-	xbps_dictionary_set_cstring_nocopy(owned_strings_container, owned, owned);
-	return owned;
+	return holder->str;
 }
 
 static void
 free_owned_strings(void) {
-	while (xbps_dictionary_count(owned_strings_container)) {
-		xbps_object_iterator_t iter = xbps_dictionary_iterator(owned_strings_container);
-		xbps_object_t keysym = xbps_object_iterator_next(iter);
-		const char *key = xbps_dictionary_keysym_cstring_nocopy(keysym);
-		const char *owned = NULL;
-		xbps_dictionary_get_cstring_nocopy(owned_strings_container, key, &owned);
-		xbps_object_iterator_release(iter);
-		xbps_dictionary_remove(owned_strings_container, owned);
-		free(__UNCONST(owned));
+	struct hash_str_holder_t *holder = NULL;
+	struct hash_str_holder_t *tmp = NULL;
+
+	HASH_ITER(hh, owned_strings_container, holder, tmp) {
+		HASH_DEL(owned_strings_container, holder);
+		free(holder->str);
+		free(holder);
 	}
 }
 
@@ -429,6 +432,7 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 		goto exit;
 	}
 	(void) print_state;
+	(void)verify_graph;
 	inconsistent = false; // verify_graph(&graph);
 	if (inconsistent) {
 		fprintf(stderr, "inconsistent graph, exiting\n");
