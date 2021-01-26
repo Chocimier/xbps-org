@@ -59,6 +59,7 @@ get_possibly_new_array(xbps_dictionary_t dict, const char *key) {
 		array = xbps_array_create();
 		if (array) {
 			xbps_dictionary_set(dict, key, array);
+			xbps_object_release(array);
 		}
 	}
 	return array;
@@ -71,6 +72,7 @@ get_possibly_new_dictionary(xbps_dictionary_t dict, const char *key) {
 		member = xbps_dictionary_create();
 		if (member) {
 			xbps_dictionary_set(dict, key, member);
+			xbps_object_release(member);
 		}
 	}
 	return member;
@@ -118,8 +120,51 @@ package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) 
 }
 
 static void
-package_destroy(struct package_t *package) {
-	xbps_object_release(package->revdeps);
+package_release(struct package_t *package) {
+	if (!package) {
+		return;
+	}
+	if (package->revdeps) {
+		xbps_object_release(package->revdeps);
+	}
+	if (package->dict) {
+		xbps_object_release(package->dict);
+	}
+}
+
+static void
+repo_state_init(struct repos_state_t *graph, struct xbps_handle *xhp, int repos_count) {
+	graph->shlib_providers = xbps_dictionary_create();
+	graph->shlib_users = xbps_dictionary_create();
+	graph->virtual_providers = xbps_dictionary_create();
+	graph->virtual_users = xbps_dictionary_create();
+	graph->repos_count = repos_count;
+	graph->repos = calloc(graph->repos_count, sizeof *graph->repos);
+	graph->xhp = xhp;
+}
+
+static void
+repo_state_release(struct repos_state_t *graph) {
+	struct node_t *current_node = NULL;
+	struct node_t *tmp_node = NULL;
+
+	HASH_ITER(hh, graph->nodes,current_node, tmp_node) {
+		HASH_DEL(graph->nodes, current_node);
+		package_release(&current_node->assured);
+		package_release(&current_node->proposed);
+		free(current_node);
+	}
+	xbps_object_release(graph->shlib_providers);
+	xbps_object_release(graph->shlib_users);
+	xbps_object_release(graph->virtual_providers);
+	xbps_object_release(graph->virtual_users);
+
+	for(int i = 0; i < graph->repos_count; ++i) {
+		if (graph->repos[i]) {
+			xbps_repo_release(graph->repos[i]);
+		}
+	}
+	free(graph->repos);
 }
 
 /**
@@ -341,7 +386,7 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
 				    existing_node->proposed.pkgver, graph->repos[existing_node->proposed.repo]->uri,
 				    new_node->proposed.pkgver, graph->repos[new_node->proposed.repo]->uri);
-				package_destroy(&new_node->proposed);
+				package_release(&new_node->proposed);
 				free(new_node);
 				continue;
 			}
@@ -349,7 +394,7 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_
 			    existing_node->proposed.pkgver, graph->repos[existing_node->proposed.repo]->uri,
 			    new_node->proposed.pkgver, graph->repos[new_node->proposed.repo]->uri);
 			HASH_DEL(graph->nodes, existing_node);
-			package_destroy(&existing_node->proposed);
+			package_release(&existing_node->proposed);
 			free(existing_node);
 		}
 
@@ -387,6 +432,11 @@ static int write_repos(struct repos_state_t *graph, const char *compression, cha
 		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], graph->repos[i]->idxmeta, compression);
 	}
 exit:
+	for (int i = 0; i < graph->repos_count; ++i) {
+		if (dictionaries[i]) {
+			xbps_object_release(dictionaries[i]);
+		}
+	}
 	free(dictionaries);
 	return rv;
 }
@@ -395,29 +445,25 @@ int
 index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *argv[])
 {
 	int rv = 0;
-	struct xbps_repo *current_repo;
 	struct repos_state_t graph = {0};
 	struct repolock_t *locks = NULL;
-	int inconsistent = -1;
-	graph.shlib_providers = xbps_dictionary_create();
-	graph.shlib_users = xbps_dictionary_create();
-	graph.virtual_providers = xbps_dictionary_create();
-	graph.virtual_users = xbps_dictionary_create();
-	graph.repos_count = argc;
-	graph.repos = calloc(graph.repos_count, sizeof *graph.repos);
-	graph.xhp = xhp;
+
+	repo_state_init(&graph, xhp, argc);
 	locks = calloc(graph.repos_count, sizeof *locks);
 	for (int i = 0; i < graph.repos_count; ++i) {
+		struct xbps_repo *current_repo = NULL;
 		const char *path = argv[i];
 		bool locked = xbps_repo_lock(xhp, path, &locks[i].fd, &locks[i].name);
+
 		if (!locked) {
-			rv = 1;
+			rv = errno;
+			fprintf(stderr, "repo '%s' failed to lock\n", path);
 			goto exit;
 		}
 		current_repo = xbps_repo_public_open(xhp, path);
-		if (current_repo == NULL) {
+		if (!current_repo) {
 			fprintf(stderr, "repo '%s' failed to open\n", path);
-			rv = 1;
+			rv = errno;
 			goto exit;
 		}
 		rv = load_repo(&graph, current_repo, i);
@@ -433,10 +479,9 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 	}
 	(void) print_state;
 	(void)verify_graph;
-	inconsistent = false; // verify_graph(&graph);
-	if (inconsistent) {
+	rv = 0; // verify_graph(&graph);
+	if (rv) {
 		fprintf(stderr, "inconsistent graph, exiting\n");
-		rv = 1;
 	} else {
 		rv = write_repos(&graph, compression, argv);
 	}
@@ -447,7 +492,7 @@ exit:
 		}
 	}
 	free(locks);
-	free(graph.repos);
+	repo_state_release(&graph);
 	free_owned_strings();
 	return rv;
 }
