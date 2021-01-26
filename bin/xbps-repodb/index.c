@@ -137,7 +137,7 @@ verify_graph(struct repos_state_t *graph) {
 			xbps_array_get_cstring_nocopy(curr_node->proposed.shlib_requires, i, &shlib);
 			if (!xbps_dictionary_get(graph->shlib_providers, shlib)) {
 				fprintf(stderr, "'%s' requires unavailable shlib '%s'\n", curr_node->proposed.pkgver, shlib);
-				rv = ENOPROTOOPT; //TODO xbps-install
+				rv = ENOEXEC;
 			}
 		}
 	}
@@ -155,13 +155,13 @@ verify_graph(struct repos_state_t *graph) {
 			}
 			if (!ok) {
 				fprintf(stderr, "'%s' requires '%s' that doesn't contain package name\n", curr_node->pkgname, deppattern);
-				rv = EFAULT;
+				rv = ENXIO;
 			}
 			HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
 			if (depnode) {
 				if (xbps_pkgpattern_match(depnode->proposed.pkgver, deppattern) != 1) {
 					fprintf(stderr, "'%s' requires package '%s', but mismatching '%s' is present\n", curr_node->proposed.pkgver, deppattern, depnode->proposed.pkgver);
-					rv = EFAULT;
+					rv = ENOENT;
 				}
 			} else { //TODO read it
 				xbps_dictionary_t virtual_versions;
@@ -261,7 +261,7 @@ build_graph(struct repos_state_t *graph) {
 			}
 			if (!ok) {
 				fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_node->proposed.pkgver, deppattern);
-				rv = EFAULT;
+				rv = ENXIO;
 				continue;
 			}
 			HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
@@ -373,7 +373,7 @@ static int write_repos(struct repos_state_t *graph, const char *compression, cha
 		dictionaries[i] = xbps_dictionary_create();
 		if (!dictionaries[i]) {
 			fprintf(stderr, "failed to allocate memory\n");
-			rv = 1;
+			rv = ENOMEM;
 			goto exit;
 		}
 	}
