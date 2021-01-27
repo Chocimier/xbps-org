@@ -17,11 +17,7 @@ struct repolock_t {
 
 struct package_t {
 	const char *pkgver;
-	xbps_array_t deps;
 	xbps_array_t revdeps;
-	xbps_array_t shlib_requires;
-	xbps_array_t shlib_provides;
-	xbps_array_t provides;
 	xbps_dictionary_t dict;
 	int repo;
 };
@@ -109,13 +105,8 @@ free_owned_strings(void) {
 static void
 package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) {
 	xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &package->pkgver);
-	package->deps = xbps_dictionary_get(pkg, "run_depends");
 	package->revdeps = xbps_array_create();
-	package->shlib_requires = xbps_dictionary_get(pkg, "shlib-requires");
-	package->shlib_provides = xbps_dictionary_get(pkg, "shlib-provides");
-	package->provides = xbps_dictionary_get(pkg, "provides");
 	package->repo = repo_serial;
-	//TODO arrays above are seem redundant now
 	package->dict = xbps_dictionary_copy(pkg);
 }
 
@@ -177,9 +168,10 @@ verify_graph(struct repos_state_t *graph) {
 	struct node_t *curr_node;
 
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
-		for (unsigned int i = 0; i < xbps_array_count(curr_node->proposed.shlib_requires); i++) {
+		xbps_array_t shlib_requires = xbps_dictionary_get(curr_node->proposed.dict, "shlib-requires");
+		for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
 			const char *shlib = NULL;
-			xbps_array_get_cstring_nocopy(curr_node->proposed.shlib_requires, i, &shlib);
+			xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
 			if (!xbps_dictionary_get(graph->shlib_providers, shlib)) {
 				fprintf(stderr, "'%s' requires unavailable shlib '%s'\n", curr_node->proposed.pkgver, shlib);
 				rv = ENOEXEC;
@@ -188,12 +180,13 @@ verify_graph(struct repos_state_t *graph) {
 	}
 
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
-		for (unsigned int i = 0; i < xbps_array_count(curr_node->proposed.deps); i++) {
+		xbps_array_t deps = xbps_dictionary_get(curr_node->proposed.dict, "run_depends");
+		for (unsigned int i = 0; i < xbps_array_count(deps); i++) {
 			char depname[XBPS_NAME_SIZE];
 			const char *deppattern = NULL;
 			struct node_t *depnode = NULL;
 			bool ok;
-			xbps_array_get_cstring_nocopy(curr_node->proposed.deps, i, &deppattern);
+			xbps_array_get_cstring_nocopy(deps, i, &deppattern);
 			ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
 			if (!ok) {
 				ok = xbps_pkg_name(depname, sizeof depname, deppattern);
@@ -249,10 +242,14 @@ build_graph(struct repos_state_t *graph) {
 	struct node_t *curr_node;
 
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
-		for (unsigned int i = 0; i < xbps_array_count(curr_node->proposed.shlib_provides); i++) {
+		xbps_array_t shlib_provides = xbps_dictionary_get(curr_node->proposed.dict, "shlib-provides");
+		xbps_array_t shlib_requires = xbps_dictionary_get(curr_node->proposed.dict, "shlib-requires");
+		xbps_array_t provides = xbps_dictionary_get(curr_node->proposed.dict, "provides");
+
+		for (unsigned int i = 0; i < xbps_array_count(shlib_provides); i++) {
 			const char *shlib = NULL;
 			xbps_array_t providers;
-			xbps_array_get_cstring_nocopy(curr_node->proposed.shlib_provides, i, &shlib);
+			xbps_array_get_cstring_nocopy(shlib_provides, i, &shlib);
 			providers = get_possibly_new_array(graph->shlib_providers, shlib);
 			if (!providers) {
 				return ENOMEM;
@@ -260,10 +257,10 @@ build_graph(struct repos_state_t *graph) {
 			xbps_array_add_cstring_nocopy(providers, curr_node->pkgname);
 		}
 
-		for (unsigned int i = 0; i < xbps_array_count(curr_node->proposed.shlib_requires); i++) {
+		for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
 			const char *shlib = NULL;
 			xbps_array_t users;
-			xbps_array_get_cstring_nocopy(curr_node->proposed.shlib_requires, i, &shlib);
+			xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
 			users = get_possibly_new_array(graph->shlib_users, shlib);
 			if (!users) {
 				return ENOMEM;
@@ -271,12 +268,12 @@ build_graph(struct repos_state_t *graph) {
 			xbps_array_add_cstring_nocopy(users, curr_node->pkgname);
 		}
 
-		for (unsigned int i = 0; i < xbps_array_count(curr_node->proposed.provides); i++) {
+		for (unsigned int i = 0; i < xbps_array_count(provides); i++) {
 			const char *virtual = NULL;
 			xbps_dictionary_t providers;
 			char virtual_pkgname[XBPS_NAME_SIZE] = {0};
 			bool ok;
-			xbps_array_get_cstring_nocopy(curr_node->proposed.provides, i, &virtual);
+			xbps_array_get_cstring_nocopy(provides, i, &virtual);
 			ok = xbps_pkg_name(virtual_pkgname, sizeof virtual_pkgname, virtual);
 			if (ok) {
 				xbps_dbg_printf(graph->xhp, "virtual '%s' (%s) provided by '%s'\n", virtual_pkgname, virtual, curr_node->pkgname);
@@ -293,13 +290,14 @@ build_graph(struct repos_state_t *graph) {
 	}
 
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
-		for (unsigned int i = 0; i < xbps_array_count(curr_node->proposed.deps); i++) {
+		xbps_array_t deps = xbps_dictionary_get(curr_node->proposed.dict, "run_depends");
+		for (unsigned int i = 0; i < xbps_array_count(deps); i++) {
 			const char *deppattern = NULL;
 			struct node_t *depnode = NULL;
 			xbps_dictionary_t virtual_providers = NULL;
 			char depname[XBPS_NAME_SIZE] = {0};
 			bool ok;
-			xbps_array_get_cstring_nocopy(curr_node->proposed.deps, i, &deppattern);
+			xbps_array_get_cstring_nocopy(deps, i, &deppattern);
 			ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
 			if (!ok) {
 				ok = xbps_pkg_name(depname, sizeof depname, deppattern);
