@@ -336,27 +336,6 @@ build_graph(struct repos_state_t *graph) {
 	return 0;
 }
 
-static int
-print_state(struct repos_state_t *graph) {
-	xbps_object_iterator_t iter;
-	xbps_object_t keysym;
-
-	iter = xbps_dictionary_iterator(graph->shlib_providers);
-	while ((keysym = xbps_object_iterator_next(iter))) {
-		const char *shlibname = xbps_dictionary_keysym_cstring_nocopy(keysym);
-		xbps_array_t pkgs = xbps_dictionary_get(graph->shlib_providers, shlibname);
-
-		fprintf(stdout, "%s:\n", shlibname);
-
-		for (unsigned int i = 0; i < xbps_array_count(pkgs); i++) {
-			const char *pkg = NULL;
-			xbps_array_get_cstring_nocopy(pkgs, i, &pkg);
-			fprintf(stdout, "  %s\n", pkg);
-		}
-	}
-	xbps_object_iterator_release(iter);
-	return 0;
-}
 
 static int
 load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_serial) {
@@ -475,7 +454,6 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 		fprintf(stderr, "can't initialize graph, exiting\n");
 		goto exit;
 	}
-	(void) print_state;
 	(void)verify_graph;
 	rv = 0; // verify_graph(&graph);
 	if (rv) {
