@@ -255,7 +255,51 @@ verify_graph(struct repos_state_t *graph) {
 	return rv;
 }
 
-static int load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial);
+static int
+load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial) {
+	xbps_object_iterator_t iter = NULL;
+	xbps_object_t keysym = NULL;
+	struct xbps_repo **repos_array = (source == SOURCE_STAGEDATA) ? graph->stages : graph->repos;
+
+	xbps_dbg_printf(graph->xhp, "loading repo '%s'\n", current_repo->uri);
+	iter = xbps_dictionary_iterator(current_repo->idx);
+	while ((keysym = xbps_object_iterator_next(iter))) {
+		xbps_dictionary_t pkg;
+		struct node_t *new_node;
+		struct node_t *existing_node = NULL;
+
+		pkg = xbps_dictionary_get_keysym(current_repo->idx, keysym);
+		new_node = calloc(1, sizeof *new_node);
+		new_node->pkgname = owned_string(xbps_dictionary_keysym_cstring_nocopy(keysym));
+		package_init(&new_node->proposed, pkg, repo_serial);
+
+		HASH_FIND(hh, graph->nodes, new_node->pkgname, strlen(new_node->pkgname), existing_node);
+
+		if (existing_node) {
+			//TODO: reverts, look at rindex' index_add
+			if (xbps_cmpver(existing_node->proposed.pkgver, new_node->proposed.pkgver) >= 0) {
+				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
+				    existing_node->proposed.pkgver, repos_array[existing_node->proposed.repo]->uri,
+				    new_node->proposed.pkgver, repos_array[new_node->proposed.repo]->uri);
+				package_release(&new_node->proposed);
+				free(new_node);
+				continue;
+			}
+			fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
+			    existing_node->proposed.pkgver, repos_array[existing_node->proposed.repo]->uri,
+			    new_node->proposed.pkgver, repos_array[new_node->proposed.repo]->uri);
+			HASH_DEL(graph->nodes, existing_node);
+			package_release(&existing_node->proposed);
+			free(existing_node);
+		}
+
+		HASH_ADD_KEYPTR(hh, graph->nodes, new_node->pkgname, strlen(new_node->pkgname), new_node);
+
+	}
+	xbps_object_iterator_release(iter);
+	return 0;
+}
+
 
 static int
 build_graph(struct repos_state_t *graph, enum source source) {
@@ -372,51 +416,6 @@ exit:
 		repo_state_purge_graph(graph);
 	}
 	return rv;
-}
-
-static int
-load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial) {
-	xbps_object_iterator_t iter = NULL;
-	xbps_object_t keysym = NULL;
-	struct xbps_repo **repos_array = (source == SOURCE_STAGEDATA) ? graph->stages : graph->repos;
-
-	xbps_dbg_printf(graph->xhp, "loading repo '%s'\n", current_repo->uri);
-	iter = xbps_dictionary_iterator(current_repo->idx);
-	while ((keysym = xbps_object_iterator_next(iter))) {
-		xbps_dictionary_t pkg;
-		struct node_t *new_node;
-		struct node_t *existing_node = NULL;
-
-		pkg = xbps_dictionary_get_keysym(current_repo->idx, keysym);
-		new_node = calloc(1, sizeof *new_node);
-		new_node->pkgname = owned_string(xbps_dictionary_keysym_cstring_nocopy(keysym));
-		package_init(&new_node->proposed, pkg, repo_serial);
-
-		HASH_FIND(hh, graph->nodes, new_node->pkgname, strlen(new_node->pkgname), existing_node);
-
-		if (existing_node) {
-			//TODO: reverts, look at rindex' index_add
-			if (xbps_cmpver(existing_node->proposed.pkgver, new_node->proposed.pkgver) >= 0) {
-				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-				    existing_node->proposed.pkgver, repos_array[existing_node->proposed.repo]->uri,
-				    new_node->proposed.pkgver, repos_array[new_node->proposed.repo]->uri);
-				package_release(&new_node->proposed);
-				free(new_node);
-				continue;
-			}
-			fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-			    existing_node->proposed.pkgver, repos_array[existing_node->proposed.repo]->uri,
-			    new_node->proposed.pkgver, repos_array[new_node->proposed.repo]->uri);
-			HASH_DEL(graph->nodes, existing_node);
-			package_release(&existing_node->proposed);
-			free(existing_node);
-		}
-
-		HASH_ADD_KEYPTR(hh, graph->nodes, new_node->pkgname, strlen(new_node->pkgname), new_node);
-
-	}
-	xbps_object_iterator_release(iter);
-	return 0;
 }
 
 static int
