@@ -45,7 +45,13 @@ struct repos_state_t {
 	xbps_dictionary_t virtual_users;
 	int repos_count;
 	struct xbps_repo **repos;
+	struct xbps_repo **stages;
 	struct xbps_handle *xhp;
+};
+
+enum source {
+	SOURCE_REPODATA = 0,
+	SOURCE_STAGEDATA
 };
 
 static xbps_array_t
@@ -124,18 +130,7 @@ package_release(struct package_t *package) {
 }
 
 static void
-repo_state_init(struct repos_state_t *graph, struct xbps_handle *xhp, int repos_count) {
-	graph->shlib_providers = xbps_dictionary_create();
-	graph->shlib_users = xbps_dictionary_create();
-	graph->virtual_providers = xbps_dictionary_create();
-	graph->virtual_users = xbps_dictionary_create();
-	graph->repos_count = repos_count;
-	graph->repos = calloc(graph->repos_count, sizeof *graph->repos);
-	graph->xhp = xhp;
-}
-
-static void
-repo_state_release(struct repos_state_t *graph) {
+repo_state_purge_graph(struct repos_state_t *graph) {
 	struct node_t *current_node = NULL;
 	struct node_t *tmp_node = NULL;
 
@@ -149,19 +144,43 @@ repo_state_release(struct repos_state_t *graph) {
 	xbps_object_release(graph->shlib_users);
 	xbps_object_release(graph->virtual_providers);
 	xbps_object_release(graph->virtual_users);
+	graph->shlib_providers = xbps_dictionary_create();
+	graph->shlib_users = xbps_dictionary_create();
+	graph->virtual_providers = xbps_dictionary_create();
+	graph->virtual_users = xbps_dictionary_create();
+}
 
+static void
+repo_state_init(struct repos_state_t *graph, struct xbps_handle *xhp, int repos_count) {
+	graph->shlib_providers = xbps_dictionary_create();
+	graph->shlib_users = xbps_dictionary_create();
+	graph->virtual_providers = xbps_dictionary_create();
+	graph->virtual_users = xbps_dictionary_create();
+	graph->repos_count = repos_count;
+	graph->repos = calloc(graph->repos_count, sizeof *graph->repos);
+	graph->stages = calloc(graph->repos_count, sizeof *graph->stages);
+	graph->xhp = xhp;
+}
+
+static void
+repo_state_release(struct repos_state_t *graph) {
+	repo_state_purge_graph(graph);
+	xbps_object_release(graph->shlib_providers);
+	xbps_object_release(graph->shlib_users);
+	xbps_object_release(graph->virtual_providers);
+	xbps_object_release(graph->virtual_users);
 	for(int i = 0; i < graph->repos_count; ++i) {
 		if (graph->repos[i]) {
 			xbps_repo_release(graph->repos[i]);
 		}
+		if (graph->stages[i]) {
+			xbps_repo_release(graph->stages[i]);
+		}
 	}
 	free(graph->repos);
+	free(graph->stages);
 }
 
-/**
- * Checks if all packages in graph have dependencies available.
- * @return Zero when graph is consistent, negative if inconsistent, positive on error.
- */
 static int
 verify_graph(struct repos_state_t *graph) {
 	int rv = 0;
@@ -236,10 +255,25 @@ verify_graph(struct repos_state_t *graph) {
 	return rv;
 }
 
+static int load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial);
+
 static int
-build_graph(struct repos_state_t *graph) {
+build_graph(struct repos_state_t *graph, enum source source) {
 	int rv = 0;
 	struct node_t *curr_node;
+
+	for (int i = 0; i < graph->repos_count; ++i) {
+		struct xbps_repo *repo = (source == SOURCE_STAGEDATA) ? graph->stages[i] : graph->repos[i];
+		if (!repo) {
+			continue;
+		}
+		fprintf(stderr, "loading repo %s, source %x\n", repo->uri, source);
+		rv = load_repo(graph, repo, source, i);
+		if (rv) {
+			fprintf(stderr, "can't load '%s' repo into graph, exiting\n", repo->uri);
+			goto exit;
+		}
+	}
 
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
 		xbps_array_t shlib_provides = xbps_dictionary_get(curr_node->proposed.dict, "shlib-provides");
@@ -323,27 +357,30 @@ build_graph(struct repos_state_t *graph) {
 	}
 
 	if (rv) {
-		return rv;
+		goto exit;
 	}
 
-	//if ((rv = verify_graph(graph))) {
-		//return rv;
-	//}
-	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
-		curr_node->assured = curr_node->proposed;
-		memset(&curr_node->proposed, 0, sizeof curr_node->proposed);
+	rv = verify_graph(graph);
+exit:
+	if (!rv) {
+		for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
+			curr_node->assured = curr_node->proposed;
+			memset(&curr_node->proposed, 0, sizeof curr_node->proposed);
+		}
+	} else {
+		fprintf(stderr, "graph from source %x failed to build\n", source);
+		repo_state_purge_graph(graph);
 	}
-	return 0;
+	return rv;
 }
 
-
 static int
-load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_serial) {
-	xbps_object_iterator_t iter;
-	xbps_object_t keysym;
+load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial) {
+	xbps_object_iterator_t iter = NULL;
+	xbps_object_t keysym = NULL;
+	struct xbps_repo **repos_array = (source == SOURCE_STAGEDATA) ? graph->stages : graph->repos;
 
 	xbps_dbg_printf(graph->xhp, "loading repo '%s'\n", current_repo->uri);
-	graph->repos[repo_serial] = current_repo;
 	iter = xbps_dictionary_iterator(current_repo->idx);
 	while ((keysym = xbps_object_iterator_next(iter))) {
 		xbps_dictionary_t pkg;
@@ -361,15 +398,15 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_
 			//TODO: reverts, look at rindex' index_add
 			if (xbps_cmpver(existing_node->proposed.pkgver, new_node->proposed.pkgver) >= 0) {
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-				    existing_node->proposed.pkgver, graph->repos[existing_node->proposed.repo]->uri,
-				    new_node->proposed.pkgver, graph->repos[new_node->proposed.repo]->uri);
+				    existing_node->proposed.pkgver, repos_array[existing_node->proposed.repo]->uri,
+				    new_node->proposed.pkgver, repos_array[new_node->proposed.repo]->uri);
 				package_release(&new_node->proposed);
 				free(new_node);
 				continue;
 			}
 			fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-			    existing_node->proposed.pkgver, graph->repos[existing_node->proposed.repo]->uri,
-			    new_node->proposed.pkgver, graph->repos[new_node->proposed.repo]->uri);
+			    existing_node->proposed.pkgver, repos_array[existing_node->proposed.repo]->uri,
+			    new_node->proposed.pkgver, repos_array[new_node->proposed.repo]->uri);
 			HASH_DEL(graph->nodes, existing_node);
 			package_release(&existing_node->proposed);
 			free(existing_node);
@@ -380,6 +417,12 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, int repo_
 	}
 	xbps_object_iterator_release(iter);
 	return 0;
+}
+
+static int
+update_repodata_from_stage(struct repos_state_t *graph) {
+	(void) graph;
+	return EALREADY;
 }
 
 static int write_repos(struct repos_state_t *graph, const char *compression, char *repos[]) {
@@ -406,7 +449,8 @@ static int write_repos(struct repos_state_t *graph, const char *compression, cha
 	}
 	// make flushing atomic?
 	for (int i = 0; i < graph->repos_count; ++i) {
-		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], graph->repos[i]->idxmeta, compression);
+		xbps_dictionary_t idxmeta = graph->repos[i] ? graph->repos[i]->idxmeta : NULL;
+		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], idxmeta, compression);
 	}
 exit:
 	for (int i = 0; i < graph->repos_count; ++i) {
@@ -428,7 +472,6 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 	repo_state_init(&graph, xhp, argc);
 	locks = calloc(graph.repos_count, sizeof *locks);
 	for (int i = 0; i < graph.repos_count; ++i) {
-		struct xbps_repo *current_repo = NULL;
 		const char *path = argv[i];
 		bool locked = xbps_repo_lock(xhp, path, &locks[i].fd, &locks[i].name);
 
@@ -437,28 +480,43 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 			fprintf(stderr, "repo '%s' failed to lock\n", path);
 			goto exit;
 		}
-		current_repo = xbps_repo_public_open(xhp, path);
-		if (!current_repo) {
-			fprintf(stderr, "repo '%s' failed to open\n", path);
-			rv = errno;
-			goto exit;
+		graph.repos[i] = xbps_repo_public_open(xhp, path);
+		if (!graph.repos[i]) {
+			if (errno == ENOENT) {
+				// TODO: initialize
+				xbps_dbg_printf(graph.xhp, "repo index '%s' is not there\n", path);
+			} else {
+				fprintf(stderr, "repo index '%s' failed to open\n", path);
+				rv = errno;
+				goto exit;
+			}
 		}
-		rv = load_repo(&graph, current_repo, i);
-		if (rv) {
-			fprintf(stderr, "can't load '%s' repo into graph, exiting\n", path);
-			goto exit;
+		graph.stages[i] = xbps_repo_stage_open(xhp, path);
+		if (!graph.stages[i]) {
+			if (errno == ENOENT) {
+				xbps_dbg_printf(graph.xhp, "repo stage '%s' is not there\n", path);
+			} else {
+				fprintf(stderr, "repo stage '%s' failed to open\n", path);
+				rv = errno;
+				goto exit;
+			}
 		}
 	}
-	rv = build_graph(&graph);
-	if (rv) {
-		fprintf(stderr, "can't initialize graph, exiting\n");
-		goto exit;
-	}
-	(void)verify_graph;
-	rv = 0; // verify_graph(&graph);
-	if (rv) {
-		fprintf(stderr, "inconsistent graph, exiting\n");
+	rv = build_graph(&graph, SOURCE_REPODATA);
+	if (!rv) {
+		rv = update_repodata_from_stage(&graph);
 	} else {
+		rv = build_graph(&graph, SOURCE_STAGEDATA);
+		if (rv) {
+			fprintf(stderr, "can't initialize graph, exiting\n");
+		}
+		// this happily overwrites inconsistent repodata with empty stagedata
+		// some heuristic may be needed to prevent
+	}
+	if (rv == EALREADY) {
+		// no updates to apply
+		rv = 0;
+	} else if (!rv) {
 		rv = write_repos(&graph, compression, argv);
 	}
 exit:
