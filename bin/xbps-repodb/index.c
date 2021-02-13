@@ -301,16 +301,16 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum sour
 
 
 static int
-build_graph(struct repos_state_t *graph, enum source source) {
+build_graph(struct repos_state_t *graph, enum source source, bool verify) {
 	int rv = 0;
 	struct node_t *curr_node;
 
 	for (int i = 0; i < graph->repos_count; ++i) {
 		struct xbps_repo *repo = (source == SOURCE_STAGEDATA) ? graph->stages[i] : graph->repos[i];
+		fprintf(stderr, "loading repo %d %p '%s', source %x\n", i, repo, (repo ? repo->uri : NULL), source);
 		if (!repo) {
 			continue;
 		}
-		fprintf(stderr, "loading repo %s, source %x\n", repo->uri, source);
 		rv = load_repo(graph, repo, source, i);
 		if (rv) {
 			fprintf(stderr, "can't load '%s' repo into graph, exiting\n", repo->uri);
@@ -381,7 +381,7 @@ build_graph(struct repos_state_t *graph, enum source source) {
 			}
 			if (!ok) {
 				fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_node->proposed.pkgver, deppattern);
-				rv = ENXIO;
+				//rv = ENXIO;
 				continue;
 			}
 			HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
@@ -395,7 +395,7 @@ build_graph(struct repos_state_t *graph, enum source source) {
 				continue;
 			}
 			xbps_dbg_printf(graph->xhp, "package '%s' depends on unreachable '%s' (%s)\n", curr_node->pkgname, depname, deppattern);
-			rv = ENOENT;
+			// rv = ENOENT;
 		}
 	}
 
@@ -403,23 +403,60 @@ build_graph(struct repos_state_t *graph, enum source source) {
 		goto exit;
 	}
 
-	rv = verify_graph(graph);
+	if (verify) {
+		rv = verify_graph(graph);
+	}
 exit:
-	if (!rv) {
+	if (rv) {
+		fprintf(stderr, "graph from source %x failed to build\n", source);
+		repo_state_purge_graph(graph);
+	} else if (verify) {
 		for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
 			curr_node->assured = curr_node->proposed;
 			memset(&curr_node->proposed, 0, sizeof curr_node->proposed);
 		}
-	} else {
-		fprintf(stderr, "graph from source %x failed to build\n", source);
-		repo_state_purge_graph(graph);
 	}
 	return rv;
 }
 
 static int
 update_repodata_from_stage(struct repos_state_t *graph) {
-	(void) graph;
+	struct repos_state_t stage = {0};
+	int rv = 0;
+	xbps_array_t differences = xbps_array_create();
+
+	repo_state_init(&stage, graph->xhp, graph->repos_count);
+	memcpy(stage.stages, graph->stages, graph->repos_count * sizeof *stage.stages);
+	rv = build_graph(&stage, SOURCE_STAGEDATA, false);
+	if (rv) {
+		fprintf(stderr, "cannot load stage\n");
+		goto exit;
+	}
+	// new and updated
+	for (struct node_t* stage_node = stage.nodes; stage_node; stage_node = stage_node->hh.next) {
+		struct node_t *graph_node = NULL;
+		HASH_FIND(hh, graph->nodes, stage_node->pkgname, strlen(stage_node->pkgname), graph_node);
+		if (!graph_node) {
+			xbps_array_add_cstring_nocopy(differences, stage_node->pkgname);
+			xbps_dbg_printf(graph->xhp, "new '%s'\n", stage_node->proposed.pkgver);
+		} else if (strcmp(graph_node->assured.pkgver, stage_node->proposed.pkgver)) { // TODO: check if newer
+			xbps_array_add_cstring_nocopy(differences, stage_node->pkgname);
+			xbps_dbg_printf(graph->xhp, "updated '%s' -> '%s'\n", graph_node->assured.pkgver, stage_node->proposed.pkgver);
+		}
+	}
+	// removed
+	for (struct node_t* graph_node = graph->nodes; graph_node; graph_node = graph_node->hh.next) {
+		struct node_t *stage_node = NULL;
+		HASH_FIND(hh, stage.nodes, graph_node->pkgname, strlen(graph_node->pkgname), stage_node);
+		if (!stage_node) {
+			xbps_array_add_cstring_nocopy(differences, graph_node->pkgname);
+			xbps_dbg_printf(graph->xhp, "removed '%s'\n", graph_node->assured.pkgver);
+		}
+	}
+exit:
+	memset(stage.stages, 0, stage.repos_count * sizeof *stage.stages);
+	repo_state_release(&stage);
+	xbps_object_release(differences);
 	return EALREADY;
 }
 
@@ -500,14 +537,16 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 			}
 		}
 	}
-	rv = build_graph(&graph, SOURCE_REPODATA);
+	rv = build_graph(&graph, SOURCE_REPODATA, true);
 	if (!rv) {
-		rv = update_repodata_from_stage(&graph);
+		update_repodata_from_stage(&graph);
+		rv = EALREADY;
 	} else {
-		rv = build_graph(&graph, SOURCE_STAGEDATA);
-		if (rv) {
-			fprintf(stderr, "can't initialize graph, exiting\n");
-		}
+		rv = EALREADY;
+//		rv = build_graph(&graph, SOURCE_STAGEDATA, true);
+//		if (rv) {
+//			fprintf(stderr, "can't initialize graph, exiting\n");
+//		}
 		// this happily overwrites inconsistent repodata with empty stagedata
 		// some heuristic may be needed to prevent
 	}
