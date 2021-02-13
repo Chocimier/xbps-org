@@ -60,8 +60,7 @@ get_possibly_new_array(xbps_dictionary_t dict, const char *key) {
 	if (!array) {
 		array = xbps_array_create();
 		if (array) {
-			xbps_dictionary_set(dict, key, array);
-			xbps_object_release(array);
+			xbps_dictionary_set_and_rel(dict, key, array);
 		}
 	}
 	return array;
@@ -73,8 +72,7 @@ get_possibly_new_dictionary(xbps_dictionary_t dict, const char *key) {
 	if (!member) {
 		member = xbps_dictionary_create();
 		if (member) {
-			xbps_dictionary_set(dict, key, member);
-			xbps_object_release(member);
+			xbps_dictionary_set_and_rel(dict, key, member);
 		}
 	}
 	return member;
@@ -113,7 +111,8 @@ package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) 
 	xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &package->pkgver);
 	package->revdeps = xbps_array_create();
 	package->repo = repo_serial;
-	package->dict = xbps_dictionary_copy(pkg);
+	xbps_object_retain(pkg);
+	package->dict = pkg;
 }
 
 static void
