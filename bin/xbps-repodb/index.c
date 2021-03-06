@@ -106,6 +106,14 @@ free_owned_strings(void) {
 	}
 }
 
+static struct package_t *
+top_package(struct node_t *node) {
+	if (node->proposed.pkgver) {
+		return &node->proposed;
+	}
+	return &node->assured;
+}
+
 static void
 package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) {
 	xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &package->pkgver);
@@ -113,6 +121,14 @@ package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) 
 	package->repo = repo_serial;
 	xbps_object_retain(pkg);
 	package->dict = pkg;
+}
+
+static struct package_t*
+package_copy(struct package_t *source, struct package_t *dest) {
+	package_init(dest, source->dict, source->repo);
+	xbps_object_release(dest->revdeps);
+	dest->revdeps = xbps_array_copy(source->revdeps);
+	return dest;
 }
 
 static void
@@ -181,6 +197,52 @@ repo_state_release(struct repos_state_t *graph) {
 }
 
 static int
+repo_is_package_missing(struct repos_state_t *graph, const char *deppattern) {
+	char depname[XBPS_NAME_SIZE];
+	struct node_t *depnode = NULL;
+	bool has_name = false;
+
+	has_name = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
+	if (!has_name) {
+		has_name = xbps_pkg_name(depname, sizeof depname, deppattern);
+	}
+	if (!has_name) {
+		return ENXIO;
+	}
+	HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
+	if (depnode) {
+		if (xbps_pkgpattern_match(top_package(depnode)->pkgver, deppattern) != 1) {
+			return ERANGE;
+		}
+	} else {
+		xbps_dictionary_t virtual_versions = NULL;
+		bool satisfied = false;
+		xbps_object_iterator_t iter = NULL;
+		xbps_object_t keysym = NULL;
+
+		virtual_versions = xbps_dictionary_get(graph->virtual_providers, depname);
+		if (!virtual_versions) {
+			return ENOENT;
+		}
+		iter = xbps_dictionary_iterator(virtual_versions);
+		while ((keysym = xbps_object_iterator_next(iter))) {
+			const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
+			const char *virtual_version = NULL;
+			xbps_dictionary_get_cstring_nocopy(virtual_versions, provider, &virtual_version);
+			if (xbps_pkgpattern_match(virtual_version, deppattern) == 1) {
+				satisfied = true;
+				break;
+			}
+		}
+		xbps_object_iterator_release(iter);
+		if (!satisfied) {
+			return ENOMSG;
+		}
+	}
+	return 0;
+}
+
+static int
 verify_graph(struct repos_state_t *graph) {
 	int rv = 0;
 	struct node_t *curr_node;
@@ -200,52 +262,25 @@ verify_graph(struct repos_state_t *graph) {
 	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
 		xbps_array_t deps = xbps_dictionary_get(curr_node->proposed.dict, "run_depends");
 		for (unsigned int i = 0; i < xbps_array_count(deps); i++) {
-			char depname[XBPS_NAME_SIZE];
+			int missing = 0;
 			const char *deppattern = NULL;
-			struct node_t *depnode = NULL;
-			bool ok;
 			xbps_array_get_cstring_nocopy(deps, i, &deppattern);
-			ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
-			if (!ok) {
-				ok = xbps_pkg_name(depname, sizeof depname, deppattern);
-			}
-			if (!ok) {
-				fprintf(stderr, "'%s' requires '%s' that doesn't contain package name\n", curr_node->pkgname, deppattern);
-				rv = ENXIO;
-			}
-			HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
-			if (depnode) {
-				if (xbps_pkgpattern_match(depnode->proposed.pkgver, deppattern) != 1) {
-					fprintf(stderr, "'%s' requires package '%s', but mismatching '%s' is present\n", curr_node->proposed.pkgver, deppattern, depnode->proposed.pkgver);
-					rv = ENOENT;
-				}
-			} else { //TODO read it
-				xbps_dictionary_t virtual_versions;
-				bool satisfied = false;
-				xbps_object_iterator_t iter;
-				xbps_object_t keysym;
-
-				virtual_versions = xbps_dictionary_get(graph->virtual_providers, depname);
-				if (!virtual_versions) {
-					rv = ENOENT;
-					fprintf(stderr, "'%s' requires unavailable package '%s'\n", curr_node->pkgname, deppattern);
-					continue;
-				}
-				iter = xbps_dictionary_iterator(virtual_versions);
-				while ((keysym = xbps_object_iterator_next(iter))) {
-					const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
-					const char *virtual_version;
-					xbps_dictionary_get_cstring_nocopy(virtual_versions, provider, &virtual_version);
-					/*xbps_dbg_printf(graph->xhp, "%s\t%s\t%s\n", depname, provider, virtual_version);*/
-					if (xbps_pkgpattern_match(virtual_version, deppattern) == 1) {
-						satisfied = true;
+			missing = repo_is_package_missing(graph, deppattern);
+			if (missing) {
+				rv = missing;
+				switch (missing) {
+					case ENXIO:
+						fprintf(stderr, "'%s' requires '%s' that doesn't contain package name\n", curr_node->pkgname, deppattern);
 						break;
-					}
-				}
-				xbps_object_iterator_release(iter);
-				if (!satisfied) {
-					rv = ENOENT;
-					fprintf(stderr, "'%s' requires unavailable package or virtual package '%s'\n", curr_node->pkgname, deppattern);
+					case ERANGE:
+						fprintf(stderr, "'%s' requires package '%s', but other version is present\n", curr_node->proposed.pkgver, deppattern);
+						break;
+					case ENOMSG:
+						fprintf(stderr, "'%s' requires virtual package in unavailable version '%s'\n", curr_node->pkgname, deppattern);
+						break;
+					default:
+						fprintf(stderr, "'%s' requires unavailable package or virtual package '%s'\n", curr_node->pkgname, deppattern);
+						break;
 				}
 			}
 		}
@@ -298,7 +333,6 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum sour
 	xbps_object_iterator_release(iter);
 	return 0;
 }
-
 
 static int
 build_graph(struct repos_state_t *graph, enum source source, bool verify) {
@@ -419,45 +453,191 @@ exit:
 	return rv;
 }
 
+static xbps_array_t
+changes_in_stage(struct repos_state_t *repodata, struct repos_state_t *stage) {
+	xbps_array_t changes = xbps_array_create();
+	// new and updated
+	for (struct node_t* stage_node = stage->nodes; stage_node; stage_node = stage_node->hh.next) {
+		struct node_t *graph_node = NULL;
+		HASH_FIND(hh, repodata->nodes, stage_node->pkgname, strlen(stage_node->pkgname), graph_node);
+		if (!graph_node) {
+			xbps_array_add_cstring_nocopy(changes, stage_node->pkgname);
+			xbps_dbg_printf(repodata->xhp, "new '%s'\n", stage_node->proposed.pkgver);
+		} else if (strcmp(graph_node->assured.pkgver, stage_node->proposed.pkgver)) { // TODO: check if newer
+			xbps_array_add_cstring_nocopy(changes, stage_node->pkgname);
+			xbps_dbg_printf(repodata->xhp, "updated '%s' -> '%s'\n", graph_node->assured.pkgver, stage_node->proposed.pkgver);
+		}
+	}
+	// removed
+	for (struct node_t* graph_node = repodata->nodes; graph_node; graph_node = graph_node->hh.next) {
+		struct node_t *stage_node = NULL;
+		HASH_FIND(hh, stage->nodes, graph_node->pkgname, strlen(graph_node->pkgname), stage_node);
+		if (!stage_node) {
+			xbps_array_add_cstring_nocopy(changes, graph_node->pkgname);
+			xbps_dbg_printf(repodata->xhp, "removed '%s'\n", graph_node->assured.pkgver);
+		}
+	}
+	return changes;
+}
+
+static int
+propose_package(const char *pkgname, struct repos_state_t *graph, struct repos_state_t *stage, xbps_dictionary_t queue) {
+	struct node_t *repodata_node = NULL;
+	struct node_t *stage_node = NULL;
+
+	(void) queue;
+
+	HASH_FIND(hh, graph->nodes, pkgname, strlen(pkgname), repodata_node);
+	HASH_FIND(hh, stage->nodes, pkgname, strlen(pkgname), stage_node);
+
+	//TODO: anything other than compatible update
+	if (stage_node && repodata_node) {
+		xbps_array_t repodata_shlib_provides = xbps_dictionary_get(repodata_node->assured.dict, "shlib-provides");
+		xbps_array_t repodata_provides = xbps_dictionary_get(repodata_node->assured.dict, "provides");
+		xbps_array_t repodata_revdeps = repodata_node->assured.revdeps;
+		xbps_array_t stage_shlib_provides = xbps_dictionary_get(stage_node->proposed.dict, "shlib-provides");
+		xbps_array_t stage_shlib_requires = xbps_dictionary_get(stage_node->proposed.dict, "shlib-requires");
+		xbps_array_t stage_provides = xbps_dictionary_get(stage_node->proposed.dict, "provides");
+		xbps_array_t stage_depends = xbps_dictionary_get(stage_node->proposed.dict, "run_depends");
+
+		// Does new version provide solibs that old provided?
+		for (unsigned int i = 0; i < xbps_array_count(repodata_shlib_provides); i++) {
+			const char *shlib = NULL;
+			xbps_array_get_cstring_nocopy(repodata_shlib_provides, i, &shlib);
+			if (!stage_shlib_provides || !xbps_match_string_in_array(stage_shlib_provides, shlib)) {
+				return ENOTSUP;
+			}
+		}
+		// Are solibs required by new versions available?
+		for (unsigned int i = 0; i < xbps_array_count(stage_shlib_requires); i++) {
+			const char *shlib = NULL;
+			xbps_array_t providers = NULL;
+			xbps_array_get_cstring_nocopy(stage_shlib_requires, i, &shlib);
+			providers = xbps_dictionary_get(graph->shlib_providers, shlib);
+			if (!xbps_array_count(providers)) {
+				return ENOTSUP;
+			}
+		}
+		// Does new version satisfy dependencies of revdeps of old version?
+		for (unsigned int i = 0; i < xbps_array_count(repodata_revdeps); i++) {
+			const char *revdep = NULL;
+			struct node_t *revdep_node = NULL;
+			xbps_array_t revdep_deps = NULL;
+			xbps_array_get_cstring_nocopy(repodata_revdeps, i, &revdep);
+			HASH_FIND(hh, graph->nodes, revdep, strlen(revdep), revdep_node);
+			if (!revdep_node) {
+				return EFAULT;
+			}
+			revdep_deps = xbps_dictionary_get(top_package(revdep_node)->dict, "run_depends");
+			if (!revdep_deps) {
+				return EFAULT;
+			}
+			if (!xbps_match_pkgdep_in_array(revdep_deps, stage_node->proposed.pkgver)) {
+				return ENOTSUP;
+			}
+		}
+		// Are dependencies of new versions available?
+		for (unsigned int i = 0; i < xbps_array_count(stage_depends); i++) {
+			const char *deppattern = NULL;
+			xbps_array_get_cstring_nocopy(stage_depends, i, &deppattern);
+			if (repo_is_package_missing(graph, deppattern)) {
+				return ENOTSUP;
+			}
+		}
+		// Does new version has all `provides` that old have?
+		for (unsigned int i = 0; i < xbps_array_count(repodata_provides); i++) {
+			const char *provides = NULL;
+			xbps_array_get_cstring_nocopy(repodata_provides, i, &provides);
+			if (!xbps_match_string_in_array(stage_provides, provides)) {
+				return ENOTSUP;
+			}
+		}
+		package_release(&repodata_node->proposed);
+		package_copy(&stage_node->proposed, &repodata_node->proposed);
+	} else {
+		return ENOTSUP;
+	}
+	return 0;
+}
+
+static int
+revert_to_assured(struct repos_state_t *graph, struct repos_state_t *stage, xbps_dictionary_t proposed_set) {
+	(void) graph;
+	(void) stage;
+	(void) proposed_set;
+
+	return -1;
+}
+
+static int
+hide_from_stage(const char *pkgname, struct repos_state_t *graph, struct repos_state_t *stage) {
+	(void) pkgname;
+	(void) graph;
+	(void) stage;
+
+	return -1;
+}
+
 static int
 update_repodata_from_stage(struct repos_state_t *graph) {
-	struct repos_state_t stage = {0};
+	struct repos_state_t *stage = calloc(1, sizeof *stage);
 	int rv = 0;
-	xbps_array_t differences = xbps_array_create();
+	xbps_array_t changes = NULL;
 
-	repo_state_init(&stage, graph->xhp, graph->repos_count);
-	memcpy(stage.stages, graph->stages, graph->repos_count * sizeof *stage.stages);
-	rv = build_graph(&stage, SOURCE_STAGEDATA, false);
+	repo_state_init(stage, graph->xhp, graph->repos_count);
+	memcpy(stage->stages, graph->stages, graph->repos_count * sizeof *stage->stages);
+	rv = build_graph(stage, SOURCE_STAGEDATA, false);
 	if (rv) {
 		fprintf(stderr, "cannot load stage\n");
 		goto exit;
 	}
-	// new and updated
-	for (struct node_t* stage_node = stage.nodes; stage_node; stage_node = stage_node->hh.next) {
-		struct node_t *graph_node = NULL;
-		HASH_FIND(hh, graph->nodes, stage_node->pkgname, strlen(stage_node->pkgname), graph_node);
-		if (!graph_node) {
-			xbps_array_add_cstring_nocopy(differences, stage_node->pkgname);
-			xbps_dbg_printf(graph->xhp, "new '%s'\n", stage_node->proposed.pkgver);
-		} else if (strcmp(graph_node->assured.pkgver, stage_node->proposed.pkgver)) { // TODO: check if newer
-			xbps_array_add_cstring_nocopy(differences, stage_node->pkgname);
-			xbps_dbg_printf(graph->xhp, "updated '%s' -> '%s'\n", graph_node->assured.pkgver, stage_node->proposed.pkgver);
-		}
-	}
-	// removed
-	for (struct node_t* graph_node = graph->nodes; graph_node; graph_node = graph_node->hh.next) {
+	rv = EALREADY;
+	changes = changes_in_stage(graph, stage);
+	for (unsigned int i = 0; i < xbps_array_count(changes); ++i) {
+		const char *pkgname = xbps_string_cstring_nocopy(xbps_array_get(changes, i));
 		struct node_t *stage_node = NULL;
-		HASH_FIND(hh, stage.nodes, graph_node->pkgname, strlen(graph_node->pkgname), stage_node);
-		if (!stage_node) {
-			xbps_array_add_cstring_nocopy(differences, graph_node->pkgname);
-			xbps_dbg_printf(graph->xhp, "removed '%s'\n", graph_node->assured.pkgver);
+		struct node_t *repodata_node = NULL;
+		xbps_dictionary_t proposed_set = NULL;
+		xbps_dictionary_t queue = NULL;
+
+		HASH_FIND(hh, stage->nodes, pkgname, strlen(pkgname), stage_node);
+		HASH_FIND(hh, graph->nodes, pkgname, strlen(pkgname), repodata_node);
+		// package already processed
+		if ((!stage_node && !repodata_node)
+		    || (stage_node && repodata_node && strcmp(stage_node->proposed.pkgver, repodata_node->assured.pkgver) == 0)) {
+			continue;
 		}
+		proposed_set = xbps_dictionary_create();
+		queue = xbps_dictionary_create();
+		xbps_dictionary_set_bool(queue, pkgname, true);
+		while (xbps_dictionary_count(queue)) {
+			xbps_object_iterator_t iter = xbps_dictionary_iterator(queue);
+			xbps_object_t keysym = xbps_object_iterator_next(iter);
+			const char *proposed_pkgname = owned_string(xbps_dictionary_keysym_cstring_nocopy(keysym));
+			int declined = 0;
+
+			xbps_dictionary_remove_keysym(queue, keysym);
+			xbps_object_iterator_release(iter);
+			declined = propose_package(proposed_pkgname, graph, stage, queue);
+			if (!declined) {
+				xbps_dictionary_set_bool(proposed_set, proposed_pkgname, true);
+				xbps_dictionary_remove(queue, proposed_pkgname);
+				fprintf(stderr, "staged '%s' accepted to repodata\n", proposed_pkgname);
+				rv = 0;
+			} else {
+				fprintf(stderr, "not accepting '%s' to repodata\n", proposed_pkgname);
+				revert_to_assured(graph, stage, proposed_set);
+				hide_from_stage(pkgname, graph, stage);
+			}
+		}
+		xbps_object_release(proposed_set);
+		xbps_object_release(queue);
 	}
 exit:
-	memset(stage.stages, 0, stage.repos_count * sizeof *stage.stages);
-	repo_state_release(&stage);
-	xbps_object_release(differences);
-	return EALREADY;
+	memset(stage->stages, 0, stage->repos_count * sizeof *stage->stages);
+	repo_state_release(stage);
+	xbps_object_release(changes);
+	return rv;
 }
 
 static int write_repos(struct repos_state_t *graph, const char *compression, char *repos[]) {
@@ -539,8 +719,7 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 	}
 	rv = build_graph(&graph, SOURCE_REPODATA, true);
 	if (!rv) {
-		update_repodata_from_stage(&graph);
-		rv = EALREADY;
+		rv = update_repodata_from_stage(&graph);
 	} else {
 		rv = EALREADY;
 //		rv = build_graph(&graph, SOURCE_STAGEDATA, true);
