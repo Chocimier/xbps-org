@@ -640,7 +640,8 @@ exit:
 	return rv;
 }
 
-static int write_repos(struct repos_state_t *graph, const char *compression, char *repos[]) {
+static int
+write_repos(struct repos_state_t *graph, const char *compression, char *repos[]) {
 	xbps_dictionary_t* dictionaries = NULL;
 	int rv = 0;
 
@@ -660,6 +661,7 @@ static int write_repos(struct repos_state_t *graph, const char *compression, cha
 	for (struct node_t *node = graph->nodes; node; node = node->hh.next) {
 		if (node->assured.dict) {
 			xbps_dictionary_set(dictionaries[node->assured.repo], node->pkgname, node->assured.dict);
+			fprintf(stderr, "Putting %s (%s) into %s \n", node->pkgname, node->assured.pkgver, graph->repos[node->assured.repo]->uri);
 		}
 	}
 	// make flushing atomic?
