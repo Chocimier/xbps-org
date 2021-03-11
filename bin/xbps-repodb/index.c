@@ -553,7 +553,7 @@ propose_package(const char *pkgname, struct repos_state_t *graph, struct repos_s
 			}
 		}
 		package_release(&repodata_node->proposed);
-		package_copy(&stage_node->proposed, &repodata_node->proposed);
+		package_copy(&stage_node->proposed, &repodata_node->assured);
 	} else {
 		return ENOTSUP;
 	}
