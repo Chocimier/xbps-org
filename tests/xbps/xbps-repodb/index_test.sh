@@ -204,9 +204,53 @@ library_split_body() {
 	atf_check_equal t$? t0
 }
 
+move_between_repos_head() {
+	atf_set "descr" "xbps-repodb(1) --index: move package between repos on update"
+}
+
+move_between_repos_body() {
+	arch=$(xbps-uhelper arch)
+	repodata=${arch}-repodata
+	stagedata=${arch}-stagedata
+	mkdir -p some_repo other_repo pkg root
+	touch pkg/file00
+	cd some_repo
+	xbps-create -A ${arch} -n lib-1.0_1 -s "lib pkg" --shlib-provides "libfoonet.so.4 libfoonum.so.1" ../pkg
+	atf_check_equal a$? a0
+	xbps-create -A ${arch} -n commA-1.0_1 -s "pkg A" --shlib-requires "libfoonum.so.1" -D 'lib>=1.0_1' ../pkg
+	atf_check_equal s$? s0
+	xbps-rindex -a $PWD/*.xbps
+	atf_check_equal d$? d0
+	atf_check_equal $? 0
+	cd ..
+	cd other_repo
+	xbps-create -A ${arch} -n pkgB-0.1_1 -s "pkgB" ../pkg
+	atf_check_equal $? 0
+	xbps-create -A ${arch} -n lib-1.1_1 -s "lib pkg" --shlib-provides "libfoonet.so.4 libfoonum.so.1" ../pkg
+	atf_check_equal $? 0
+	xbps-rindex -a $PWD/*.xbps
+	atf_check_equal $? 0
+	mv ${repodata} tmpdata
+	xbps-rindex -a $PWD/pkgB-0.1_1.${arch}.xbps
+	atf_check_equal $? 0
+	cd ..
+	atf_check_equal "$(xbps-query --repository=some_repo -p pkgver commA)b" commA-1.0_1b
+	atf_check_equal "$(xbps-query --repository=some_repo -p pkgver lib)b" lib-1.0_1b
+	atf_check_equal "$(xbps-query --repository=other_repo -p pkgver lib)b" b
+	cp some_repo/${repodata} some_repo/${stagedata}
+	mv other_repo/tmpdata other_repo/${stagedata}
+	xbps-repodb --index some_repo other_repo
+	atf_check_equal $? 0
+	rm some_repo/${stagedata} other_repo/${stagedata}
+	atf_check_equal "$(xbps-query --repository=some_repo -p pkgver commA)" commA-1.0_1
+	atf_check_equal "$(xbps-query --repository=other_repo -p pkgver lib)" lib-1.1_1
+	atf_check_equal "$(xbps-query --repository=some_repo -p pkgver lib)" ""
+}
+
 atf_init_test_cases() {
 	atf_add_test_case update
 	atf_add_test_case nonexistent_requires
 	atf_add_test_case library_advanced
 	atf_add_test_case library_split
+	atf_add_test_case move_between_repos
 }
