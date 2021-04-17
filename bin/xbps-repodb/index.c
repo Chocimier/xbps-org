@@ -211,7 +211,7 @@ repo_is_package_missing(struct repos_state_t *graph, const char *deppattern) {
 	}
 	HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
 	if (depnode) {
-		if (xbps_pkgpattern_match(top_package(depnode)->pkgver, deppattern) != 1) {
+		if (xbps_pkgpattern_match(top_package(depnode)->pkgver, deppattern)) {
 			return ERANGE;
 		}
 	} else {
@@ -229,7 +229,7 @@ repo_is_package_missing(struct repos_state_t *graph, const char *deppattern) {
 			const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
 			const char *virtual_version = NULL;
 			xbps_dictionary_get_cstring_nocopy(virtual_versions, provider, &virtual_version);
-			if (xbps_pkgpattern_match(virtual_version, deppattern) == 1) {
+			if (xbps_pkgpattern_match(virtual_version, deppattern)) {
 				satisfied = true;
 				break;
 			}
@@ -481,25 +481,157 @@ changes_in_stage(struct repos_state_t *repodata, struct repos_state_t *stage) {
 }
 
 static int
+remove_from_graph(const char *pkgname, struct repos_state_t *graph) {
+	struct node_t *curr_node;
+	xbps_array_t shlib_provides = NULL;
+	xbps_array_t shlib_requires = NULL;
+	xbps_array_t provides = NULL;
+	bool found = false;
+
+	HASH_FIND(hh, graph->nodes, pkgname, strlen(pkgname), curr_node);
+
+	if (!curr_node) {
+		xbps_dbg_printf(graph->xhp, "Can't remove '%s', it's not here\n", pkgname);
+		return EFAULT;
+	}
+
+	shlib_provides = xbps_dictionary_get(curr_node->assured.dict, "shlib-provides");
+	shlib_requires = xbps_dictionary_get(curr_node->assured.dict, "shlib-requires");
+	provides = xbps_dictionary_get(curr_node->assured.dict, "provides");
+
+	for (unsigned int i = 0; i < xbps_array_count(shlib_provides); i++) {
+		const char *shlib = NULL;
+		xbps_array_t providers;
+		xbps_array_get_cstring_nocopy(shlib_provides, i, &shlib);
+		providers = get_possibly_new_array(graph->shlib_providers, shlib);
+		if (!providers) {
+			//TODO
+			xbps_dbg_printf(graph->xhp, "Can't find '%s' of pkgname, it's not here\n", pkgname);
+			return EFAULT;
+		}
+		do {
+			found = xbps_remove_string_from_array(providers, pkgname);
+		} while (found);
+	}
+
+	for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
+		const char *shlib = NULL;
+		xbps_array_t users;
+		xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
+		users = get_possibly_new_array(graph->shlib_users, shlib);
+		if (!users) {
+			//TODO
+			xbps_dbg_printf(graph->xhp, "Can't find '%s' of pkgname, it's not here\n", pkgname);
+			return EFAULT;
+		}
+		do {
+			found = xbps_remove_string_from_array(users, pkgname);
+		} while (found);
+	}
+
+	for (unsigned int i = 0; i < xbps_array_count(provides); i++) {
+		const char *virtual = NULL;
+		xbps_dictionary_t providers;
+		char virtual_pkgname[XBPS_NAME_SIZE] = {0};
+		bool ok;
+		xbps_array_get_cstring_nocopy(provides, i, &virtual);
+		ok = xbps_pkg_name(virtual_pkgname, sizeof virtual_pkgname, virtual);
+		if(!ok) {
+			xbps_dbg_printf(graph->xhp, "invalid virtual pkgver '%s' provided by package '%s', ignoring\n", virtual, curr_node->pkgname);
+			continue;
+		}
+		providers = xbps_dictionary_get(graph->virtual_providers, virtual_pkgname);
+		if (!providers) {
+			return EFAULT;
+		}
+		xbps_dictionary_set_cstring_nocopy(providers, curr_node->pkgname, virtual);
+	}
+
+	for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
+		xbps_array_t deps = xbps_dictionary_get(curr_node->proposed.dict, "run_depends");
+		for (unsigned int i = 0; i < xbps_array_count(deps); i++) {
+			const char *deppattern = NULL;
+			struct node_t *depnode = NULL;
+			xbps_dictionary_t virtual_providers = NULL;
+			char depname[XBPS_NAME_SIZE] = {0};
+			bool ok;
+			xbps_array_get_cstring_nocopy(deps, i, &deppattern);
+			ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
+			if (!ok) {
+				ok = xbps_pkg_name(depname, sizeof depname, deppattern);
+			}
+			if (!ok) {
+				fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_node->proposed.pkgver, deppattern);
+				//rv = ENXIO;
+				continue;
+			}
+			HASH_FIND(hh, graph->nodes, depname, strlen(depname), depnode);
+			if (depnode) {
+				xbps_array_add_cstring_nocopy(depnode->proposed.revdeps, curr_node->pkgname);
+				continue;
+			}
+			virtual_providers = xbps_dictionary_get(graph->virtual_providers, depname);
+			if (virtual_providers) {
+				xbps_dictionary_set_cstring_nocopy(get_possibly_new_dictionary(graph->virtual_users, depname), curr_node->pkgname, deppattern);
+				continue;
+			}
+			xbps_dbg_printf(graph->xhp, "package '%s' depends on unreachable '%s' (%s)\n", curr_node->pkgname, depname, deppattern);
+			// rv = ENOENT;
+		}
+	}
+
+	if (rv) {
+		goto exit;
+	}
+
+	if (verify) {
+		rv = verify_graph(graph);
+	}
+exit:
+	if (rv) {
+		fprintf(stderr, "graph from source %x failed to build\n", source);
+		repo_state_purge_graph(graph);
+	} else if (verify) {
+		for (curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
+			curr_node->assured = curr_node->proposed;
+			memset(&curr_node->proposed, 0, sizeof curr_node->proposed);
+		}
+	}
+	return rv;
+
+	return -1;
+}
+
+static int
 propose_package(const char *pkgname, struct repos_state_t *graph, struct repos_state_t *stage, xbps_dictionary_t queue) {
 	struct node_t *repodata_node = NULL;
 	struct node_t *stage_node = NULL;
+	xbps_array_t repodata_shlib_provides = NULL;
+	xbps_array_t repodata_provides = NULL;
+	xbps_array_t repodata_revdeps = NULL;
+	xbps_array_t stage_shlib_provides = NULL;
+	xbps_array_t stage_shlib_requires = NULL;
+	xbps_array_t stage_provides = NULL;
+	xbps_array_t stage_depends = NULL;
 
 	(void) queue;
 
 	HASH_FIND(hh, graph->nodes, pkgname, strlen(pkgname), repodata_node);
 	HASH_FIND(hh, stage->nodes, pkgname, strlen(pkgname), stage_node);
 
-	//TODO: anything other than compatible update
-	if (stage_node && repodata_node) {
-		xbps_array_t repodata_shlib_provides = xbps_dictionary_get(repodata_node->assured.dict, "shlib-provides");
-		xbps_array_t repodata_provides = xbps_dictionary_get(repodata_node->assured.dict, "provides");
-		xbps_array_t repodata_revdeps = repodata_node->assured.revdeps;
-		xbps_array_t stage_shlib_provides = xbps_dictionary_get(stage_node->proposed.dict, "shlib-provides");
-		xbps_array_t stage_shlib_requires = xbps_dictionary_get(stage_node->proposed.dict, "shlib-requires");
-		xbps_array_t stage_provides = xbps_dictionary_get(stage_node->proposed.dict, "provides");
-		xbps_array_t stage_depends = xbps_dictionary_get(stage_node->proposed.dict, "run_depends");
+	if (repodata_node) {
+		repodata_shlib_provides = xbps_dictionary_get(repodata_node->assured.dict, "shlib-provides");
+		repodata_provides = xbps_dictionary_get(repodata_node->assured.dict, "provides");
+		repodata_revdeps = repodata_node->assured.revdeps;
+	}
+	if (stage_node) {
+		stage_shlib_provides = xbps_dictionary_get(stage_node->proposed.dict, "shlib-provides");
+		stage_shlib_requires = xbps_dictionary_get(stage_node->proposed.dict, "shlib-requires");
+		stage_provides = xbps_dictionary_get(stage_node->proposed.dict, "provides");
+		stage_depends = xbps_dictionary_get(stage_node->proposed.dict, "run_depends");
+	}
 
+	if (stage_node && repodata_node) {
 		// Does new version provide solibs that old provided?
 		for (unsigned int i = 0; i < xbps_array_count(repodata_shlib_provides); i++) {
 			const char *shlib = NULL;
@@ -554,6 +686,75 @@ propose_package(const char *pkgname, struct repos_state_t *graph, struct repos_s
 		}
 		package_release(&repodata_node->proposed);
 		package_copy(&stage_node->proposed, &repodata_node->assured);
+	} else if (repodata_node) {
+		// Are provided solibs used?
+		for (unsigned int i = 0; i < xbps_array_count(repodata_shlib_provides); i++) {
+			const char *shlib = NULL;
+			xbps_array_t users = NULL;
+			xbps_array_t providers = NULL;
+			xbps_array_get_cstring_nocopy(repodata_shlib_provides, i, &shlib);
+			users = xbps_dictionary_get(graph->shlib_users, shlib);
+			providers = xbps_dictionary_get(graph->shlib_providers, shlib);
+			if (xbps_array_count(users) > 0 && xbps_array_count(providers) < 2) {
+				return ENOTSUP;
+			}
+		}
+		// Is package a dependency?
+		if (xbps_array_count(repodata_revdeps)) {
+			return ENOTSUP;
+		}
+		// Are all used `provides` backed by other packages?
+		for (unsigned int i = 0; i < xbps_array_count(repodata_provides); i++) {
+			const char *virtual = NULL;
+			char virtual_pkgname[XBPS_NAME_SIZE] = {0};
+			xbps_dictionary_t users = NULL;
+			xbps_object_iterator_t users_iter = NULL;
+			xbps_dictionary_t providers = NULL;
+			xbps_dictionary_keysym_t keysym = NULL;
+			bool ok = false;
+			bool backed = true;
+
+			xbps_array_get_cstring_nocopy(repodata_provides, i, &virtual);
+			ok = xbps_pkg_name(virtual_pkgname, sizeof virtual_pkgname, virtual);
+			if (!ok) {
+				return EFAULT;
+			}
+			providers = xbps_dictionary_get(graph->virtual_providers, virtual_pkgname);
+			users = xbps_dictionary_get(graph->virtual_users, virtual_pkgname);
+			users_iter = xbps_dictionary_iterator(users);
+			while ((keysym = xbps_object_iterator_next(users_iter))) {
+				xbps_object_iterator_t providers_iter = NULL;
+				const char *user = xbps_dictionary_keysym_cstring_nocopy(keysym);
+				const char *req_pattern = xbps_dictionary_get_keysym(users, keysym);
+
+				providers_iter = xbps_dictionary_iterator(providers);
+				backed = false;
+				while ((keysym = xbps_object_iterator_next(providers_iter))) {
+					const char *provider_pkgname = xbps_dictionary_keysym_cstring_nocopy(keysym);
+					const char *provided_pkgver = xbps_dictionary_get_keysym(providers, keysym);
+
+					if (strcmp(provider_pkgname, pkgname) == 0) {
+						continue;
+					}
+					if (xbps_pkgpattern_match(provided_pkgver, req_pattern)) {
+						backed = true;
+						break;
+					}
+				}
+				xbps_object_iterator_release(providers_iter);
+				if (!backed) {
+					xbps_dbg_printf(graph->xhp,
+						"Package '%s' cannot be removed, as it is the only provider of '%s', used by '%s'.\n",
+						pkgname, req_pattern, user);
+					break;
+				}
+			}
+			xbps_object_iterator_release(users_iter);
+			if (!backed) {
+				return ENOTSUP;
+			}
+		}
+		remove_from_graph(pkgname, graph);
 	} else {
 		return ENOTSUP;
 	}
