@@ -7,6 +7,8 @@
 
 #include <picosat.h>
 
+#define VARIABLE_NUMBER_STEP 4
+
 enum source {
 	SOURCE_REPODATA = 0,
 	SOURCE_STAGEDATA,
@@ -72,7 +74,6 @@ static struct hash_str_holder_t *owned_strings_container = NULL;
 static struct variable_t *variables_by_name = NULL;
 static struct variable_t *variables_by_number = NULL;
 
-static const int VARIABLE_NUMBER_STEP = 4;
 static int variable_next_number = VARIABLE_NUMBER_STEP;
 
 static char *
