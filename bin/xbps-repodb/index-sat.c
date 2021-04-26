@@ -24,6 +24,7 @@ struct hash_str_holder_t {
 	UT_hash_handle hh;
 };
 
+// TODO move to anonymous_repo ?
 struct repolock_t {
 	int fd;
 	char *name;
@@ -43,6 +44,12 @@ struct node_t {
 	UT_hash_handle hh;
 };
 
+struct anonymous_repo_t {
+	struct xbps_repo *repo;
+	xbps_dictionary_t idx;
+	xbps_dictionary_t meta;
+};
+
 struct repos_state_t {
 	struct node_t *nodes;
 	/**
@@ -55,8 +62,8 @@ struct repos_state_t {
 	 */
 	xbps_dictionary_t virtual_providers;
 	int repos_count;
-	struct xbps_repo **repos;
-	struct xbps_repo **stages;
+	struct anonymous_repo_t *repos;
+	struct anonymous_repo_t *stages;
 	struct xbps_handle *xhp;
 };
 
@@ -204,11 +211,11 @@ repo_state_release(struct repos_state_t *graph) {
 	xbps_object_release(graph->shlib_providers);
 	xbps_object_release(graph->virtual_providers);
 	for(int i = 0; i < graph->repos_count; ++i) {
-		if (graph->repos[i]) {
-			xbps_repo_release(graph->repos[i]);
+		if (graph->repos[i].repo) {
+			xbps_repo_release(graph->repos[i].repo);
 		}
-		if (graph->stages[i]) {
-			xbps_repo_release(graph->stages[i]);
+		if (graph->stages[i].repo) {
+			xbps_repo_release(graph->stages[i].repo);
 		}
 	}
 	free(graph->repos);
@@ -220,7 +227,7 @@ static int
 load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial) {
 	xbps_object_iterator_t iter = NULL;
 	xbps_dictionary_keysym_t keysym = NULL;
-	struct xbps_repo **repos_array = (source == SOURCE_STAGEDATA) ? graph->stages : graph->repos;
+	struct anonymous_repo_t *repos_array = (source == SOURCE_STAGEDATA) ? graph->stages : graph->repos;
 
 	xbps_dbg_printf(graph->xhp, "loading repo '%s'\n", current_repo->uri);
 	iter = xbps_dictionary_iterator(current_repo->idx);
@@ -245,13 +252,13 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum sour
 			//TODO: reverts, look at rindex' index_add
 			if (xbps_cmpver(existing_package->pkgver, pkgver) >= 0) { // TODO check if <=
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-				    existing_package->pkgver, repos_array[existing_package->repo]->uri,
-				    pkgver, repos_array[repo_serial]->uri);
+				    existing_package->pkgver, repos_array[existing_package->repo].repo->uri,
+				    pkgver, repos_array[repo_serial].repo->uri);
 				continue;
 			}
 			fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-			    pkgver, repos_array[repo_serial]->uri,
-			    existing_package->pkgver, repos_array[existing_package->repo]->uri);
+			    pkgver, repos_array[repo_serial].repo->uri,
+			    existing_package->pkgver, repos_array[existing_package->repo].repo->uri);
 			package_release(existing_package);
 			package_init(existing_package, pkg, repo_serial);
 		} else {
@@ -293,7 +300,7 @@ build_graph(struct repos_state_t *graph) {
 
 	for (int i = 0; i < graph->repos_count; ++i) {
 		for (enum source source = SOURCE_REPODATA; source <= SOURCE_STAGEDATA; ++source) {
-			struct xbps_repo *repo = (source == SOURCE_STAGEDATA) ? graph->stages[i] : graph->repos[i];
+			struct xbps_repo *repo = ((source == SOURCE_STAGEDATA) ? graph->stages[i] : graph->repos[i]).repo;
 			fprintf(stderr, "loading repo %d %p '%s', source %x\n", i, repo, (repo ? repo->uri : NULL), source);
 			if (!repo) {
 				continue;
@@ -364,30 +371,39 @@ exit:
 }
 
 static int
-generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
+generate_constraints(struct repos_state_t *graph, PicoSAT* solver, bool explaining) {
 	int rv = 0;
+	int clause_idx = 0;
 	for (struct node_t *curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
 		if (curr_node->assured.pkgver && curr_node->proposed.pkgver) {
 			if (strcmp(curr_node->assured.pkgver, curr_node->proposed.pkgver) == 0) {
-				printf("(%s)\n", curr_node->assured.pkgver);
-//				fprintf(stderr, "picosat_add_arg(solver, variable_real_package(curr_node->assured.pkgver)=%d, zero);\n", variable_real_package(curr_node->assured.pkgver));
+				if (explaining) {
+					printf("⊤ → %s [%d]\n", curr_node->assured.pkgver, clause_idx++);
+				}
 				picosat_add_arg(solver, variable_real_package(curr_node->assured.pkgver), 0);
 			} else {
 				int assured_variable = variable_real_package(curr_node->assured.pkgver);
 				int proposed_variable = variable_real_package(curr_node->proposed.pkgver);
 
-				printf("%s ↔ ¬ %s\n", curr_node->assured.pkgver, curr_node->proposed.pkgver);
+				if (explaining) {
+					printf("%s ↔ ¬ %s [%d] [%d]\n", curr_node->assured.pkgver, curr_node->proposed.pkgver, clause_idx, clause_idx+1);
+				}
+				clause_idx += 2;
 				// p ↔ ¬q == (p → ¬q) ∧ (¬q → p) == (¬p ∨ ¬q) ∧ (q ∨ p)
-				//fprintf(stderr, "picosat_add_arg(solver, assured_variable=%d, proposed_variable=%d, zero);\n", assured_variable, proposed_variable);
 				picosat_add_arg(solver, assured_variable, proposed_variable, 0);
-//				fprintf(stderr, "picosat_add_arg(solver, -assured_variable=%d, -proposed_variable=%d, zero);\n", -assured_variable, -proposed_variable);
 				picosat_add_arg(solver, -assured_variable, -proposed_variable, 0);
-				picosat_assume(solver, proposed_variable);
+				if (!explaining) {
+					picosat_assume(solver, proposed_variable);
+				}
 			}
 		} else if (curr_node->assured.pkgver) {
-			picosat_assume(solver, -variable_real_package(curr_node->assured.pkgver));
+			if (!explaining) {
+				picosat_assume(solver, -variable_real_package(curr_node->assured.pkgver));
+			}
 		} else if (curr_node->proposed.pkgver) {
-			picosat_assume(solver, variable_real_package(curr_node->proposed.pkgver));
+			if (!explaining) {
+				picosat_assume(solver, variable_real_package(curr_node->proposed.pkgver));
+			}
 		}
 
 		for (enum source source = SOURCE_REPODATA; source <= SOURCE_STAGEDATA; ++source) {
@@ -403,8 +419,9 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 			for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
 				const char *shlib = NULL;
 				xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
-				printf("%s → %s\n", curr_package->pkgver, shlib);
-//				fprintf(stderr, "picosat_add_arg(solver, -variable_real_package(curr_package->pkgver)=%d, variable_shlib(shlib)=%d, zero);", -variable_real_package(curr_package->pkgver), variable_shlib(shlib));
+				if (explaining) {
+					printf("%s → %s [%d]\n", curr_package->pkgver, shlib, clause_idx++);
+				}
 				picosat_add_arg(solver, -variable_real_package(curr_package->pkgver), variable_shlib(shlib), 0);
 			}
 
@@ -413,10 +430,8 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 				const char *deppattern = NULL;
 				char depname[XBPS_NAME_SIZE];
 				bool ok = false;
+
 				xbps_array_get_cstring_nocopy(run_depends, i, &deppattern);
-				if (strcmp(deppattern, "awk>=0") == 0) {
-					puts("");
-				}
 				ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
 				if (!ok) {
 					ok = xbps_pkg_name(depname, sizeof depname, deppattern);
@@ -427,8 +442,9 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 					continue;
 				}
 
-				printf("%s → (", curr_package->pkgver);
-//				fprintf(stderr, "picosat_add(solver, -variable_real_package(curr_package->pkgver)=%d);\n", -variable_real_package(curr_package->pkgver));
+				if (explaining) {
+					printf("%s → (", curr_package->pkgver);
+				}
 				picosat_add(solver, -variable_real_package(curr_package->pkgver));
 				{
 					struct node_t *dep_node = NULL;
@@ -437,13 +453,15 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 
 					if (dep_node) {
 						if (dep_node->assured.pkgver && xbps_pkgpattern_match(dep_node->assured.pkgver, deppattern)) {
-							printf("virt(%s) ∨ ", dep_node->assured.pkgver);
-//							fprintf(stderr, "picosat_add(solver, variable_virtual_package(dep_node->assured.pkgver)=%d);\n", variable_virtual_package(dep_node->assured.pkgver));
+							if (explaining) {
+								printf("virt(%s) ∨ ", dep_node->assured.pkgver);
+							}
 							picosat_add(solver, variable_virtual_package(dep_node->assured.pkgver));
 						}
 						if (dep_node->proposed.pkgver && (!dep_node->assured.pkgver || (strcmp(dep_node->assured.pkgver, dep_node->proposed.pkgver) != 0) ) && xbps_pkgpattern_match(dep_node->proposed.pkgver, deppattern)) {
-							printf("virt(%s) ∨ ", dep_node->proposed.pkgver);
-//							fprintf(stderr, "picosat_add(solver, variable_virtual_package(dep_node->proposed.pkgver)=%d);\n", variable_virtual_package(dep_node->proposed.pkgver));
+							if (explaining) {
+								printf("virt(%s) ∨ ", dep_node->proposed.pkgver);
+							}
 							picosat_add(solver, variable_virtual_package(dep_node->proposed.pkgver));
 						}
 					}
@@ -460,16 +478,18 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 							const char *virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, keysym));
 							if (xbps_pkgpattern_match(virtual, deppattern)) {
 								const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
-								printf("virt(%s) ∨ ", provider);
-//								fprintf(stderr, "picosat_add(solver, variable_virtual_package(provider)=%d);\n", variable_virtual_package(provider));
+								if (explaining) {
+									printf("virt(%s) ∨ ", provider);
+								}
 								picosat_add(solver, variable_virtual_package(provider));
 							}
 						}
 						xbps_object_iterator_release(iter);
 					}
 				}
-				printf("⊥) [%s]\n", deppattern);
-//				fprintf(stderr, "picosat_add(solver, zero);\n");
+				if (explaining) {
+					printf("⊥) {%s} [%d]\n", deppattern, clause_idx++);
+				}
 				picosat_add(solver, 0);
 			}
 			{
@@ -483,10 +503,11 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 				// p ↔ (q ∨ r) == (1.) ∧ (2.)
 				// 1. p → (q ∨ r) == ¬p ∨ q ∨ r
 				// 2. (q ∨ r) → p == (q → p) ∧ (r → p) == (¬q ∨ p) ∧ (¬r ∨ p)
-				printf("virt(%s) ↔ (%s", curr_package->pkgver, curr_package->pkgver);
+				if (explaining) {
+					printf("virt(%s) ↔ (%s", curr_package->pkgver, curr_package->pkgver);
+				}
 				provider_variables[pv_idx++] = -curr_package_virtual_variable;
 				provider_variables[pv_idx++] = curr_package_real_variable;
-//				fprintf(stderr, "picosat_add_arg(solver, -curr_package_real_variable=%d, curr_package_virtual_variable=%d, zero);\n", -curr_package_real_variable, curr_package_virtual_variable);
 				picosat_add_arg(solver, -curr_package_real_variable, curr_package_virtual_variable, 0);
 				if (providers) {
 					xbps_object_iterator_t iter = xbps_dictionary_iterator(providers);
@@ -498,14 +519,21 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 							const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
 							int provider_variable = variable_real_package(provider);
 
-							printf(" ∨ %s", provider);
+							if (explaining) {
+								printf(" ∨ %s", provider);
+							}
 							provider_variables[pv_idx++] = provider_variable;
-//							fprintf(stderr, "picosat_add_arg(solver, -provider_variable=%d, curr_package_virtual_variable=%d, zero);\n", -provider_variable, curr_package_virtual_variable);
 							picosat_add_arg(solver, -provider_variable, curr_package_virtual_variable, 0);
 						}
 					}
 				}
-				printf(")\n");
+				if (explaining) {
+					printf(")");
+					for (int *var = provider_variables; *var; ++var) {
+						printf(" [%d]", clause_idx++);
+					}
+					printf("\n");
+				}
 				picosat_add_lits(solver, provider_variables);
 				free(provider_variables);
 			}
@@ -549,7 +577,9 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 				}
 				// virtual package on left side + providers + terminator
 				provider_variables = calloc(xbps_dictionary_count(providers) + 2, sizeof *provider_variables);
-				printf("virt(%s) ↔ (", outer_virtual);
+				if (explaining) {
+					printf("virt(%s) ↔ (", outer_virtual);
+				}
 				provider_variables[pv_idx++] = -outer_virtual_variable;
 				providers_inner_iter = xbps_dictionary_iterator(providers);
 				while ((providers_inner_keysym = xbps_object_iterator_next(providers_inner_iter))) {
@@ -558,14 +588,21 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 					if (strcmp(outer_virtual, inner_virtual) == 0) {
 						int provider_variable = variable_real_package(inner_provider);
 
-						printf("%s ∨ ", inner_provider);
+						if (explaining) {
+							printf("%s ∨ ", inner_provider);
+						}
 						provider_variables[pv_idx++] = provider_variable;
-//						fprintf(stderr, "picosat_add_arg(solver, -provider_variable=%d, outer_virtual_variable=%d, zero);\n", -provider_variable, outer_virtual_variable);
 						picosat_add_arg(solver, -provider_variable, outer_virtual_variable, 0);
 					}
 				}
 				xbps_object_iterator_release(providers_inner_iter);
-				printf("⊥)\n");
+				if (explaining) {
+					printf("⊥)");
+					for (int *var = provider_variables; *var; ++var) {
+						printf(" [%d]", clause_idx++);
+					}
+					printf("\n");
+				}
 				picosat_add_lits(solver, provider_variables);
 				free(provider_variables);
 				xbps_dictionary_set_bool(processed_pkgvers, outer_virtual, true);
@@ -585,27 +622,57 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver) {
 			int pv_idx = 0;
 			int shlib_variable = variable_shlib(shlib);
 
-			printf("%s ↔ (", shlib);
+			if (explaining) {
+				printf("%s ↔ (", shlib);
+			}
 			provider_variables[pv_idx++] = -shlib_variable;
 			for (unsigned int i = 0; i < xbps_array_count(providers); ++i) {
 				const char *provider = NULL;
 				int provider_variable;
 
 				xbps_array_get_cstring_nocopy(providers, i, &provider);
-				printf("%s ∨ ", provider);
+				if (explaining) {
+					printf("%s ∨ ", provider);
+				}
 				provider_variable = variable_real_package(provider);
 				provider_variables[pv_idx++] = provider_variable;
-//				fprintf(stderr, "picosat_add_arg(solver, -provider_variable=%d, shlib_variable=%d, zero);\n", -provider_variable, shlib_variable);
 				picosat_add_arg(solver, -provider_variable, shlib_variable, 0);
 			}
-			printf("⊥)\n");
-				if (!*provider_variables) {
+			if (explaining) {
+				printf("⊥)");
+				for (int *var = provider_variables; *var; ++var) {
+					printf(" [%d]", clause_idx++);
 				}
+				printf("\n");
+			}
 			picosat_add_lits(solver, provider_variables);
 			free(provider_variables);
 		}
 		xbps_object_iterator_release(iter);
 	}
+	return rv;
+}
+
+static int
+explain_inconsistency(struct repos_state_t *graph) {
+	PicoSAT *solver = picosat_init();
+	int rv = 0;
+
+	picosat_enable_trace_generation(solver);
+	rv = generate_constraints(graph, solver, true);
+	if (rv) {
+		fprintf(stderr, "Failed to generate constraints for explaining: %s\n", strerror(rv));
+		goto exit;
+	}
+	picosat_sat(solver, -1);
+	fprintf(stderr, "Inconsistent clauses:\n");
+	for (int i = 0; i < picosat_added_original_clauses(solver); ++i) {
+		if (picosat_coreclause(solver, i)) {
+			fprintf(stderr, " [%d]\n", i);
+		}
+	}
+exit:
+	picosat_reset(solver);
 	return rv;
 }
 
@@ -616,7 +683,7 @@ update_repodata(struct repos_state_t *graph) {
 	const int *correcting = NULL;
 	PicoSAT *solver = picosat_init();
 
-	rv = generate_constraints(graph, solver);
+	rv = generate_constraints(graph, solver, false);
 	if (rv) {
 		fprintf(stderr, "Failed to generate constraints: %s\n", strerror(rv));
 		goto exit;
@@ -638,6 +705,7 @@ update_repodata(struct repos_state_t *graph) {
 				break;
 		}
 		fprintf(stderr, "inconsistent: %d\n", picosat_inconsistent(solver));
+		explain_inconsistency(graph);
 		rv = EPROTO;
 		goto exit;
 	}
@@ -684,13 +752,12 @@ write_repos(struct repos_state_t *graph, const char *compression, char *repos[])
 		struct package_t *package = node_package_by_source(node, node->source);
 		if (package && package->dict) {
 			xbps_dictionary_set(dictionaries[package->repo], node->pkgname, package->dict);
-			xbps_dbg_printf(graph->xhp, "Putting %s (%s) into %s \n", node->pkgname, package->pkgver, graph->repos[package->repo]->uri);
+			xbps_dbg_printf(graph->xhp, "Putting %s (%s) into %s \n", node->pkgname, package->pkgver, repos[package->repo]);
 		}
 	}
 	// make flushing atomic?
 	for (int i = 0; i < graph->repos_count; ++i) {
-		xbps_dictionary_t idxmeta = graph->repos[i] ? graph->repos[i]->idxmeta : NULL;
-		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], idxmeta, compression);
+		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], graph->repos[i].meta, compression);
 	}
 exit:
 	for (int i = 0; i < graph->repos_count; ++i) {
@@ -721,33 +788,36 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 			fprintf(stderr, "repo '%s' failed to lock\n", path);
 			goto exit;
 		}
-		graph.repos[i] = xbps_repo_public_open(xhp, path);
-		if (!graph.repos[i]) {
-			if (errno == ENOENT) {
-				graph.repos[i] = xbps_dictionary_create();
-				xbps_dbg_printf(graph.xhp, "repo index '%s' is not there\n", path);
-			} else {
-				fprintf(stderr, "repo index '%s' failed to open\n", path);
-				rv = errno;
-				goto exit;
-			}
+		graph.repos[i].repo = xbps_repo_public_open(xhp, path);
+		if (graph.repos[i].repo) {
+			graph.repos[i].idx = graph.repos[i].repo->idx;
+			graph.repos[i].meta = graph.repos[i].repo->idxmeta;
+		} else if (errno == ENOENT) {
+			graph.repos[i].idx = xbps_dictionary_create();
+			graph.repos[i].meta = NULL;
+			xbps_dbg_printf(graph.xhp, "repo index '%s' is not there\n", path);
+		} else {
+			fprintf(stderr, "repo index '%s' failed to open\n", path);
+			rv = errno;
+			goto exit;
 		}
-		graph.stages[i] = xbps_repo_stage_open(xhp, path);
-		if (!graph.stages[i]) {
-			if (errno == ENOENT) {
-				xbps_dbg_printf(graph.xhp, "repo stage '%s' is not there\n", path);
-			} else {
-				fprintf(stderr, "repo stage '%s' failed to open\n", path);
-				rv = errno;
-				goto exit;
-			}
+		graph.stages[i].repo = xbps_repo_stage_open(xhp, path);
+		if (graph.stages[i].repo) {
+			graph.stages[i].idx = graph.stages[i].repo->idx;
+			graph.stages[i].meta = graph.stages[i].repo->idxmeta;
+		} else if (errno == ENOENT) {
+			xbps_dbg_printf(graph.xhp, "repo stage '%s' is not there\n", path);
+		} else {
+			fprintf(stderr, "repo stage '%s' failed to open\n", path);
+			rv = errno;
+			goto exit;
 		}
 	}
 	rv = build_graph(&graph);
 	if (rv) {
 		goto exit;
 	}
-//	rv = update_repodata(&graph);
+	rv = update_repodata(&graph);
 	(void) update_repodata;
 	if (rv == EALREADY) {
 		// no updates to apply
