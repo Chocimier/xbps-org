@@ -34,6 +34,7 @@ tests/*/*/*/*_test
 tests/*/*/*/*_tests
 tests/*/*/*_test
 tests/*/*/*_tests
+tests/xbps/xbps-repodb/manual/repos
 include/xbps.h
 
 # vim backup files
