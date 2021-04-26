@@ -5,6 +5,8 @@
 #include "defs.h"
 #include "uthash.h"
 
+`
+
 struct hash_str_holder_t {
 	char *str;
 	UT_hash_handle hh;
