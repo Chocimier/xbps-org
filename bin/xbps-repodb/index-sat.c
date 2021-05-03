@@ -34,8 +34,7 @@ struct package_t {
 
 struct node_t {
 	char *pkgname;
-	struct package_t assured;
-	struct package_t proposed;
+	struct package_t packages[2];
 	enum source source;
 	UT_hash_handle hh;
 };
@@ -172,25 +171,14 @@ repo_state_purge_graph(struct repos_state_t *graph) {
 
 	HASH_ITER(hh, graph->nodes,current_node, tmp_node) {
 		HASH_DEL(graph->nodes, current_node);
-		package_release(&current_node->assured);
-		package_release(&current_node->proposed);
+		package_release(&current_node->packages[SOURCE_REPODATA]);
+		package_release(&current_node->packages[SOURCE_STAGEDATA]);
 		free(current_node);
 	}
 	xbps_object_release(graph->shlib_providers);
 	xbps_object_release(graph->virtual_providers);
 	graph->shlib_providers = xbps_dictionary_create();
 	graph->virtual_providers = xbps_dictionary_create();
-}
-
-static struct package_t*
-node_package_by_source(struct node_t* node, enum source source) {
-	if (!node) {
-		return NULL;
-	} else if (source == SOURCE_REPODATA) {
-		return &node->assured;
-	} else {
-		return &node->proposed;
-	}
 }
 
 static void
@@ -239,12 +227,12 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum sour
 		struct package_t *existing_package = NULL;
 
 		HASH_FIND(hh, graph->nodes, pkgname, strlen(pkgname), existing_node);
-		existing_package = node_package_by_source(existing_node, source);
+		existing_package = &existing_node->packages[source];
 
 		if (!existing_node) {
 			new_node = calloc(1, sizeof *new_node);
 			new_node->pkgname = pkgname;
-			package_init(node_package_by_source(new_node, source), pkg, repo_serial);
+			package_init(&new_node->packages[source], pkg, repo_serial);
 			HASH_ADD_KEYPTR(hh, graph->nodes, pkgname, strlen(pkgname), new_node);
 		} else if (existing_package->pkgver) {
 			const char *pkgver = NULL;
@@ -329,7 +317,7 @@ build_graph(struct repos_state_t *graph) {
 			xbps_array_t shlib_provides = NULL;
 			xbps_array_t provides = NULL;
 
-			curr_package = node_package_by_source(curr_node, source);
+			curr_package = &curr_node->packages[source];
 			if (!curr_package->pkgver) {
 				continue;
 			}
@@ -383,40 +371,42 @@ static int
 generate_constraints(struct repos_state_t *graph, PicoSAT* solver, bool explaining) {
 	int rv = 0;
 	for (struct node_t *curr_node = graph->nodes; curr_node; curr_node = curr_node->hh.next) {
-		if (curr_node->assured.pkgver && curr_node->proposed.pkgver) {
-			if (strcmp(curr_node->assured.pkgver, curr_node->proposed.pkgver) == 0) {
+		const char *curr_repo_pkgver = curr_node->packages[SOURCE_REPODATA].pkgver;
+		const char *curr_stage_pkgver = curr_node->packages[SOURCE_STAGEDATA].pkgver;
+		if (curr_repo_pkgver && curr_stage_pkgver) {
+			if (strcmp(curr_repo_pkgver, curr_stage_pkgver) == 0) {
 				if (explaining) {
-					char *clause = xbps_xasprintf("⊤ → %s", curr_node->assured.pkgver);
+					char *clause = xbps_xasprintf("⊤ → %s", curr_repo_pkgver);
 					add_text_clause(graph, clause, 1);
 				}
-				picosat_add_arg(solver, variable_real_package(curr_node->assured.pkgver), 0);
+				picosat_add_arg(solver, variable_real_package(curr_repo_pkgver), 0);
 			} else {
-				int assured_variable = variable_real_package(curr_node->assured.pkgver);
-				int proposed_variable = variable_real_package(curr_node->proposed.pkgver);
+				int repo_variable = variable_real_package(curr_repo_pkgver);
+				int stage_variable = variable_real_package(curr_stage_pkgver);
 
 				if (explaining) {
-					char *clause = xbps_xasprintf("%s ↔ ¬ %s", curr_node->assured.pkgver, curr_node->proposed.pkgver);
+					char *clause = xbps_xasprintf("%s ↔ ¬ %s", curr_repo_pkgver, curr_stage_pkgver);
 					add_text_clause(graph, clause, 2);
 				}
 				// p ↔ ¬q == (p → ¬q) ∧ (¬q → p) == (¬p ∨ ¬q) ∧ (q ∨ p)
-				picosat_add_arg(solver, assured_variable, proposed_variable, 0);
-				picosat_add_arg(solver, -assured_variable, -proposed_variable, 0);
+				picosat_add_arg(solver, repo_variable, stage_variable, 0);
+				picosat_add_arg(solver, -repo_variable, -stage_variable, 0);
 				if (!explaining) {
-					picosat_assume(solver, proposed_variable);
+					picosat_assume(solver, stage_variable);
 				}
 			}
-		} else if (curr_node->assured.pkgver) {
+		} else if (curr_repo_pkgver) {
 			if (!explaining) {
-				picosat_assume(solver, -variable_real_package(curr_node->assured.pkgver));
+				picosat_assume(solver, -variable_real_package(curr_repo_pkgver));
 			}
-		} else if (curr_node->proposed.pkgver) {
+		} else if (curr_stage_pkgver) {
 			if (!explaining) {
-				picosat_assume(solver, variable_real_package(curr_node->proposed.pkgver));
+				picosat_assume(solver, variable_real_package(curr_stage_pkgver));
 			}
 		}
 
 		for (enum source source = SOURCE_REPODATA; source <= SOURCE_STAGEDATA; ++source) {
-			struct package_t *curr_package = node_package_by_source(curr_node, source);
+			struct package_t *curr_package = &curr_node->packages[source];
 			xbps_array_t shlib_requires = NULL;
 			xbps_array_t run_depends = NULL;
 
@@ -449,7 +439,7 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver, bool explaini
 					ok = xbps_pkg_name(depname, sizeof depname, deppattern);
 				}
 				if (!ok) {
-					fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_node->proposed.pkgver, deppattern);
+					fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_package->pkgver, deppattern);
 					rv = ENXIO;
 					continue;
 				}
@@ -464,21 +454,23 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver, bool explaini
 					HASH_FIND(hh, graph->nodes, depname, strlen(depname), dep_node);
 
 					if (dep_node) {
-						if (dep_node->assured.pkgver && xbps_pkgpattern_match(dep_node->assured.pkgver, deppattern)) {
+						const char *dep_repo_pkgver = dep_node->packages[SOURCE_REPODATA].pkgver;
+						const char *dep_stage_pkgver = dep_node->packages[SOURCE_STAGEDATA].pkgver;
+						if (dep_repo_pkgver && xbps_pkgpattern_match(dep_repo_pkgver, deppattern)) {
 							if (explaining) {
 								clause_part = clause;
-								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_node->assured.pkgver);
+								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_repo_pkgver);
 								free(clause_part);
 							}
-							picosat_add(solver, variable_virtual_package(dep_node->assured.pkgver));
+							picosat_add(solver, variable_virtual_package(dep_repo_pkgver));
 						}
-						if (dep_node->proposed.pkgver && (!dep_node->assured.pkgver || (strcmp(dep_node->assured.pkgver, dep_node->proposed.pkgver) != 0) ) && xbps_pkgpattern_match(dep_node->proposed.pkgver, deppattern)) {
+						if (dep_stage_pkgver && (!dep_repo_pkgver || (strcmp(dep_repo_pkgver, dep_stage_pkgver) != 0) ) && xbps_pkgpattern_match(dep_stage_pkgver, deppattern)) {
 							if (explaining) {
 								clause_part = clause;
-								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_node->proposed.pkgver);
+								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_stage_pkgver);
 								free(clause_part);
 							}
-							picosat_add(solver, variable_virtual_package(dep_node->proposed.pkgver));
+							picosat_add(solver, variable_virtual_package(dep_stage_pkgver));
 						}
 					}
 				}
@@ -581,11 +573,11 @@ generate_constraints(struct repos_state_t *graph, PicoSAT* solver, bool explaini
 			HASH_FIND(hh, graph->nodes, virtual_pkgname, strlen(virtual_pkgname), realpkg_node);
 
 			if (realpkg_node) {
-				if (realpkg_node->assured.pkgver) {
-					xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->assured.pkgver, true);
+				if (realpkg_node->packages[SOURCE_REPODATA].pkgver) {
+					xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->packages[SOURCE_REPODATA].pkgver, true);
 				}
-				if (realpkg_node->proposed.pkgver) {
-					xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->proposed.pkgver, true);
+				if (realpkg_node->packages[SOURCE_STAGEDATA].pkgver) {
+					xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->packages[SOURCE_STAGEDATA].pkgver, true);
 				}
 			}
 
@@ -789,7 +781,7 @@ write_repos(struct repos_state_t *graph, const char *compression, char *repos[])
 		}
 	}
 	for (struct node_t *node = graph->nodes; node; node = node->hh.next) {
-		struct package_t *package = node_package_by_source(node, node->source);
+		struct package_t *package = &node->packages[node->source];
 		if (package && package->dict) {
 			xbps_dictionary_set(dictionaries[package->repo], node->pkgname, package->dict);
 			xbps_dbg_printf(graph->xhp, "Putting %s (%s) into %s \n", node->pkgname, package->pkgver, repos[package->repo]);
