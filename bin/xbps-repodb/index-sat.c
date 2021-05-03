@@ -246,8 +246,7 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum sour
 		} else if (existing_package->pkgver) {
 			const char *pkgver = NULL;
 			xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &pkgver);
-			//TODO: reverts, look at rindex' index_add
-			if (xbps_cmpver(existing_package->pkgver, pkgver) >= 0) { // TODO check if <=
+			if (xbps_pkg_version_order(existing_package->dict, pkg) >= 0) {
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
 				    existing_package->pkgver, repos_array[existing_package->repo].repo->uri,
 				    pkgver, repos_array[repo_serial].repo->uri);
