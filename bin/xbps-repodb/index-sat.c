@@ -147,6 +147,20 @@ variable_name(int number) {
 }
 
 static void
+free_variables(void) {
+	struct variable_t *holder = NULL;
+	struct variable_t *tmp = NULL;
+
+	HASH_ITER(hh_by_name, variables_by_name, holder, tmp) {
+		HASH_DELETE(hh_by_name, variables_by_name, holder);
+	}
+	HASH_ITER(hh_by_number, variables_by_number, holder, tmp) {
+		HASH_DELETE(hh_by_number, variables_by_number, holder);
+		free(holder);
+	}
+}
+
+static void
 package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) {
 	xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &package->pkgver);
 	package->repo = repo_serial;
@@ -282,8 +296,9 @@ add_text_clause(struct repos_group_t *group, char *clause, int copies) {
 	xbps_object_t obj = xbps_string_create_cstring(clause);
 	xbps_dbg_printf(group->xhp, "%s [%d]\n", clause, xbps_array_count(group->text_clauses));
 	while (copies--) {
-		xbps_array_set(group->text_clauses, xbps_array_count(group->text_clauses), obj);
+		xbps_array_add(group->text_clauses, obj);
 	}
+	xbps_object_release(obj);
 	free(clause);
 }
 
@@ -542,6 +557,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 							picosat_add_arg(solver, -provider_variable, curr_package_virtual_variable, 0);
 						}
 					}
+					xbps_object_iterator_release(iter);
 				}
 				if (explaining) {
 					clause_part = clause;
@@ -629,7 +645,9 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				xbps_dictionary_set_bool(processed_pkgvers, outer_virtual, true);
 			}
 			xbps_object_iterator_release(providers_outer_iter);
+			xbps_object_release(processed_pkgvers);
 		}
+		xbps_object_iterator_release(virtual_pkgs_iter);
 	}
 	{
 		xbps_object_iterator_t iter = xbps_dictionary_iterator(group->shlib_providers);
@@ -659,6 +677,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				if (explaining) {
 					clause_part = clause;
 					clause = xbps_xasprintf("%s%s ∨ ", clause_part, provider);
+					free(clause_part);
 					++copies_count;
 				}
 				provider_variable = variable_real_package(provider);
@@ -819,6 +838,7 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 		if (public->repo) {
 			public->idx = public->repo->idx;
 			public->meta = public->repo->idxmeta;
+			xbps_object_retain(public->idx);
 		} else if (errno == ENOENT) {
 			public->idx = xbps_dictionary_create();
 			public->meta = NULL;
@@ -841,6 +861,9 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 		}
 	}
 	rv = build_group(&group);
+	for (int i = 0; i < group.repos_count; ++i) {
+		xbps_object_release(group.repos[i][SOURCE_PUBLIC].idx);
+	}
 	if (rv) {
 		goto exit;
 	}
@@ -858,6 +881,7 @@ exit:
 		}
 	}
 	repo_group_release(&group);
+	free_variables();
 	free_owned_strings();
 	return rv;
 }
