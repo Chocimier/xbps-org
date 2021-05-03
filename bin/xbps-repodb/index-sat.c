@@ -26,12 +26,6 @@ struct hash_str_holder_t {
 	UT_hash_handle hh;
 };
 
-// TODO move to anonymous_repo ?
-struct repolock_t {
-	int fd;
-	char *name;
-};
-
 struct package_t {
 	const char *pkgver;
 	xbps_dictionary_t dict;
@@ -47,9 +41,11 @@ struct node_t {
 };
 
 struct anonymous_repo_t {
-	struct xbps_repo *repo;
 	xbps_dictionary_t idx;
 	xbps_dictionary_t meta;
+	struct xbps_repo *repo;
+	char *lock_name;
+	int lock_fd;
 };
 
 struct repos_state_t {
@@ -776,13 +772,11 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 {
 	int rv = 0;
 	struct repos_state_t graph = {0};
-	struct repolock_t *locks = NULL;
 
 	repo_state_init(&graph, xhp, argc);
-	locks = calloc(graph.repos_count, sizeof *locks);
 	for (int i = 0; i < graph.repos_count; ++i) {
 		const char *path = argv[i];
-		bool locked = xbps_repo_lock(xhp, path, &locks[i].fd, &locks[i].name);
+		bool locked = xbps_repo_lock(xhp, path, &graph.repos[i].lock_fd, &graph.repos[i].lock_name);
 
 		if (!locked) {
 			rv = errno;
@@ -828,11 +822,10 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 	}
 exit:
 	for (int i = graph.repos_count - 1; i >= 0; --i) {
-		if (locks[i].fd) {
-			xbps_repo_unlock(locks[i].fd, locks[i].name);
+		if (graph.repos[i].lock_fd) {
+			xbps_repo_unlock(graph.repos[i].lock_fd,graph.repos[i].lock_name);
 		}
 	}
-	free(locks);
 	repo_state_release(&graph);
 	free_owned_strings();
 	return rv;
