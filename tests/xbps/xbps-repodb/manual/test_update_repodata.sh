@@ -13,7 +13,7 @@ for i in repos/*x86_64-repodata; do
 		LD_LIBRARY_PATH="${DESTDIR}/usr/local/lib" "${DESTDIR}/usr/local/bin/xbps-checkvers" -D $(xdistdir) -e --format='%n-%r.x86_64.xbps' -i --repository=$PWD |
 			xargs env LD_LIBRARY_PATH="${DESTDIR}/usr/local/lib" "${DESTDIR}/usr/local/bin/xbps-rindex" -R
 		cat ../../outdated |
-			xargs -n1 env LD_LIBRARY_PATH="${DESTDIR}/usr/local/lib" "${DESTDIR}/usr/local/bin/xbps-rindex" -R
+			xargs env LD_LIBRARY_PATH="${DESTDIR}/usr/local/lib" "${DESTDIR}/usr/local/bin/xbps-rindex" -R
 		mv x86_64-repodata x86_64-stagedata
 		tar -zcf x86_64-repodata index.plist index-meta.plist
 	)
