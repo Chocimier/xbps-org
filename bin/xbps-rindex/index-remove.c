@@ -101,16 +101,8 @@ index_remove(struct xbps_handle *xhp, int args, int argmax, char **argv, const c
 		 */
 		curpkgd = xbps_dictionary_get(idx, pkgname);
 		if (!curpkgd) {
-			if (errno == ENOENT) {
-				xbps_dbg_printf(xhp, "Package %s isn't indexed in %s, skipping.\n",
-				    pkgname, repodir);
-				goto again;
-			}
-			rv = errno;
-			fprintf(stderr, "%s: cannot read metadata of %s from repodata\n", _XBPS_RINDEX, pkgname);
-			free(arch);
-			free(pkgver);
-			goto out;
+			xbps_dbg_printf(xhp, "Package %s isn't indexed in %s, skipping.\n", pkgname, repodir);
+			goto again;
 		}
 
 
