@@ -59,8 +59,8 @@ struct repos_state_t {
 	 */
 	xbps_dictionary_t virtual_providers;
 	int repos_count;
-	struct anonymous_repo_t *repos;
-	struct anonymous_repo_t *stages;
+	/** array of pairs of anonymous_repo_t */
+	struct anonymous_repo_t (*sources)[2];
 	xbps_array_t text_clauses;
 	struct xbps_handle *xhp;
 };
@@ -186,8 +186,7 @@ repo_state_init(struct repos_state_t *graph, struct xbps_handle *xhp, int repos_
 	graph->shlib_providers = xbps_dictionary_create();
 	graph->virtual_providers = xbps_dictionary_create();
 	graph->repos_count = repos_count;
-	graph->repos = calloc(graph->repos_count, sizeof *graph->repos);
-	graph->stages = calloc(graph->repos_count, sizeof *graph->stages);
+	graph->sources = calloc(graph->repos_count, sizeof *graph->sources);
 	graph->text_clauses = xbps_array_create();
 	graph->xhp = xhp;
 }
@@ -198,24 +197,21 @@ repo_state_release(struct repos_state_t *graph) {
 	xbps_object_release(graph->shlib_providers);
 	xbps_object_release(graph->virtual_providers);
 	for(int i = 0; i < graph->repos_count; ++i) {
-		if (graph->repos[i].repo) {
-			xbps_repo_release(graph->repos[i].repo);
+		if (graph->sources[i][SOURCE_REPODATA].repo) {
+			xbps_repo_release(graph->sources[i][SOURCE_REPODATA].repo);
 		}
-		if (graph->stages[i].repo) {
-			xbps_repo_release(graph->stages[i].repo);
+		if (graph->sources[i][SOURCE_STAGEDATA].repo) {
+			xbps_repo_release(graph->sources[i][SOURCE_STAGEDATA].repo);
 		}
 	}
-	free(graph->repos);
-	free(graph->stages);
+	free(graph->sources);
 	xbps_object_release(graph->text_clauses);
 }
-
 
 static int
 load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum source source, int repo_serial) {
 	xbps_object_iterator_t iter = NULL;
 	xbps_dictionary_keysym_t keysym = NULL;
-	struct anonymous_repo_t *repos_array = (source == SOURCE_STAGEDATA) ? graph->stages : graph->repos;
 
 	xbps_dbg_printf(graph->xhp, "loading repo '%s'\n", current_repo->uri);
 	iter = xbps_dictionary_iterator(current_repo->idx);
@@ -239,13 +235,13 @@ load_repo(struct repos_state_t *graph, struct xbps_repo *current_repo, enum sour
 			xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &pkgver);
 			if (xbps_pkg_version_order(existing_package->dict, pkg) >= 0) {
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-				    existing_package->pkgver, repos_array[existing_package->repo].repo->uri,
-				    pkgver, repos_array[repo_serial].repo->uri);
+				    existing_package->pkgver, graph->sources[existing_package->repo][source].repo->uri,
+				    pkgver, graph->sources[repo_serial][source].repo->uri);
 				continue;
 			}
 			fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
-			    pkgver, repos_array[repo_serial].repo->uri,
-			    existing_package->pkgver, repos_array[existing_package->repo].repo->uri);
+			    pkgver, graph->sources[repo_serial][source].repo->uri,
+			    existing_package->pkgver,graph->sources[existing_package->repo][source].repo->uri);
 			package_release(existing_package);
 			package_init(existing_package, pkg, repo_serial);
 		} else {
@@ -297,7 +293,7 @@ build_graph(struct repos_state_t *graph) {
 
 	for (int i = 0; i < graph->repos_count; ++i) {
 		for (enum source source = SOURCE_REPODATA; source <= SOURCE_STAGEDATA; ++source) {
-			struct xbps_repo *repo = ((source == SOURCE_STAGEDATA) ? graph->stages[i] : graph->repos[i]).repo;
+			struct xbps_repo *repo = graph->sources[i][source].repo;
 			fprintf(stderr, "loading repo %d %p '%s', source %x\n", i, repo, (repo ? repo->uri : NULL), source);
 			if (!repo) {
 				continue;
@@ -789,7 +785,7 @@ write_repos(struct repos_state_t *graph, const char *compression, char *repos[])
 	}
 	// make flushing atomic?
 	for (int i = 0; i < graph->repos_count; ++i) {
-		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], graph->repos[i].meta, compression);
+		xbps_repodata_flush(graph->xhp, repos[i], "repodata", dictionaries[i], graph->sources[i][SOURCE_REPODATA].meta, compression);
 	}
 exit:
 	for (int i = 0; i < graph->repos_count; ++i) {
@@ -811,30 +807,32 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 	repo_state_init(&graph, xhp, argc);
 	for (int i = 0; i < graph.repos_count; ++i) {
 		const char *path = argv[i];
-		bool locked = xbps_repo_lock(xhp, path, &graph.repos[i].lock_fd, &graph.repos[i].lock_name);
+		struct anonymous_repo_t *public = &graph.sources[i][SOURCE_REPODATA];
+		struct anonymous_repo_t *stage = &graph.sources[i][SOURCE_STAGEDATA];
+		bool locked = xbps_repo_lock(xhp, path, &public->lock_fd, &public->lock_name);
 
 		if (!locked) {
 			rv = errno;
 			fprintf(stderr, "repo '%s' failed to lock\n", path);
 			goto exit;
 		}
-		graph.repos[i].repo = xbps_repo_public_open(xhp, path);
-		if (graph.repos[i].repo) {
-			graph.repos[i].idx = graph.repos[i].repo->idx;
-			graph.repos[i].meta = graph.repos[i].repo->idxmeta;
+		public->repo = xbps_repo_public_open(xhp, path);
+		if (public->repo) {
+			public->idx = public->repo->idx;
+			public->meta = public->repo->idxmeta;
 		} else if (errno == ENOENT) {
-			graph.repos[i].idx = xbps_dictionary_create();
-			graph.repos[i].meta = NULL;
+			public->idx = xbps_dictionary_create();
+			public->meta = NULL;
 			xbps_dbg_printf(graph.xhp, "repo index '%s' is not there\n", path);
 		} else {
 			fprintf(stderr, "repo index '%s' failed to open\n", path);
 			rv = errno;
 			goto exit;
 		}
-		graph.stages[i].repo = xbps_repo_stage_open(xhp, path);
-		if (graph.stages[i].repo) {
-			graph.stages[i].idx = graph.stages[i].repo->idx;
-			graph.stages[i].meta = graph.stages[i].repo->idxmeta;
+		stage->repo = xbps_repo_stage_open(xhp, path);
+		if (stage->repo) {
+			stage->idx = stage->repo->idx;
+			stage->meta = stage->repo->idxmeta;
 		} else if (errno == ENOENT) {
 			xbps_dbg_printf(graph.xhp, "repo stage '%s' is not there\n", path);
 		} else {
@@ -856,8 +854,8 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 	}
 exit:
 	for (int i = graph.repos_count - 1; i >= 0; --i) {
-		if (graph.repos[i].lock_fd) {
-			xbps_repo_unlock(graph.repos[i].lock_fd,graph.repos[i].lock_name);
+		if (graph.sources[i][SOURCE_REPODATA].lock_fd) {
+			xbps_repo_unlock(graph.sources[i][SOURCE_REPODATA].lock_fd, graph.sources[i][SOURCE_REPODATA].lock_name);
 		}
 	}
 	repo_state_release(&graph);
