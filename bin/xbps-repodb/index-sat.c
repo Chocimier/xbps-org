@@ -70,6 +70,7 @@ static struct hash_str_holder_t *owned_strings_container = NULL;
 static struct variable_t *variables_by_name = NULL;
 static struct variable_t *variables_by_number = NULL;
 
+// zero means end of clause, cannot be used as variable
 static int variable_next_number = VARIABLE_NUMBER_STEP;
 
 static char *
@@ -110,7 +111,6 @@ variable_by_name(const char *pkgver) {
 		holder->str = owned;
 		holder->number = variable_next_number;
 		variable_next_number += VARIABLE_NUMBER_STEP;
-//		fprintf(stderr, "%d := '%s'\n", holder->number, pkgver);
 		HASH_ADD_KEYPTR(hh_by_name, variables_by_name, owned, len, holder);
 		HASH_ADD(hh_by_number, variables_by_number, number, sizeof holder->number, holder);
 	}
@@ -162,10 +162,10 @@ free_variables(void) {
 
 static void
 package_init(struct package_t *package, xbps_dictionary_t pkg, int repo_serial) {
-	xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &package->pkgver);
-	package->repo = repo_serial;
 	xbps_object_retain(pkg);
+	xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &package->pkgver);
 	package->dict = pkg;
+	package->repo = repo_serial;
 }
 
 static void
@@ -237,8 +237,9 @@ load_repo(struct repos_group_t *group, struct xbps_repo *current_repo, enum sour
 		struct package_t *existing_package = NULL;
 
 		HASH_FIND(hh, group->nodes, pkgname, strlen(pkgname), existing_node);
-		existing_package = &existing_node->packages[source];
-
+		if (existing_node) {
+			existing_package = &existing_node->packages[source];
+		}
 		if (!existing_node) {
 			new_node = calloc(1, sizeof *new_node);
 			new_node->pkgname = pkgname;
@@ -702,6 +703,7 @@ static int
 explain_inconsistency(struct repos_group_t *group) {
 	PicoSAT *solver = picosat_init();
 	int rv = 0;
+	int decision;
 
 	picosat_enable_trace_generation(solver);
 	rv = generate_constraints(group, solver, true);
@@ -709,7 +711,11 @@ explain_inconsistency(struct repos_group_t *group) {
 		fprintf(stderr, "Failed to generate constraints for explaining: %s\n", strerror(rv));
 		goto exit;
 	}
-	picosat_sat(solver, -1);
+	decision = picosat_sat(solver, -1);
+	if (decision != PICOSAT_UNSATISFIABLE) {
+		fprintf(stderr, "Cannot explain inconsistency, expected state is %d, actual state is %d\n", PICOSAT_UNSATISFIABLE, decision);
+		goto exit;
+	}
 	fprintf(stderr, "Inconsistent clauses:\n");
 	for (int i = 0; i < picosat_added_original_clauses(solver); ++i) {
 		if (picosat_coreclause(solver, i)) {
@@ -735,8 +741,6 @@ update_repodata(struct repos_group_t *group) {
 		fprintf(stderr, "Failed to generate constraints: %s\n", strerror(rv));
 		goto exit;
 	}
-//	picosat_print(solver, stdout);
-	fprintf(stderr, "picosat_next_minimal_correcting_subset_of_assumptions ...\n");
 	correcting = picosat_next_minimal_correcting_subset_of_assumptions(solver);
 	decision = picosat_res(solver);
 	if (decision != PICOSAT_SATISFIABLE) {
@@ -763,7 +767,7 @@ update_repodata(struct repos_group_t *group) {
 		const char *pkgver = variable_name(*correcting);
 
 		xbps_pkg_name(pkgname, sizeof pkgname, pkgver);
-		xbps_dbg_printf(group->xhp, "correcting %s\n", pkgver);
+		xbps_dbg_printf(group->xhp, "not updating '%s'\n", pkgver);
 		HASH_FIND(hh, group->nodes, pkgname, strlen(pkgname), node);
 		if (!node) {
 			fprintf(stderr, "No package '%s' (%s) found\n", pkgname, pkgver);
@@ -785,7 +789,7 @@ write_repos(struct repos_group_t *group, const char *compression, char *repos[])
 	dictionaries = calloc(group->repos_count, sizeof *dictionaries);
 	if (!dictionaries) {
 		fprintf(stderr, "failed to allocate memory\n");
-		return 1;
+		return EFAULT;
 	}
 	for (int i = 0; i < group->repos_count; ++i) {
 		dictionaries[i] = xbps_dictionary_create();
@@ -797,12 +801,20 @@ write_repos(struct repos_group_t *group, const char *compression, char *repos[])
 	}
 	for (struct node_t *node = group->nodes; node; node = node->hh.next) {
 		struct package_t *package = &node->packages[node->source];
-		if (package && package->dict) {
+		if (node->source == SOURCE_STAGE) {
+			if (!node->packages[SOURCE_PUBLIC].pkgver) {
+				printf("Adding '%s'\n", package->pkgver);
+			} else if (!package->pkgver) {
+				printf("Removing '%s'\n", node->packages[SOURCE_PUBLIC].pkgver);
+			} else if (strcmp(node->packages[SOURCE_PUBLIC].pkgver, package->pkgver) != 0) {
+				printf("Updating from '%s' to '%s'\n", node->packages[SOURCE_PUBLIC].pkgver, package->pkgver);
+			}
+		}
+		if (package->dict) {
 			xbps_dictionary_set(dictionaries[package->repo], node->pkgname, package->dict);
 			xbps_dbg_printf(group->xhp, "Putting %s (%s) into %s \n", node->pkgname, package->pkgver, repos[package->repo]);
 		}
 	}
-	// make flushing atomic?
 	for (int i = 0; i < group->repos_count; ++i) {
 		xbps_repodata_flush(group->xhp, repos[i], "repodata", dictionaries[i], group->repos[i][SOURCE_PUBLIC].meta, compression);
 	}
