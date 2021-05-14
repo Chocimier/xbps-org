@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -12,6 +13,7 @@
 enum source {
 	SOURCE_PUBLIC = 0,
 	SOURCE_STAGE,
+	SOURCE_NONE,
 };
 
 struct variable_t {
@@ -32,10 +34,18 @@ struct package_t {
 	int repo;
 };
 
+struct node_t;
+
 struct node_t {
 	char *pkgname;
 	struct package_t packages[2];
 	enum source source;
+	/**
+	 * NULL means package should be updated on its own pace.
+	 * Pointer to self means base node is not present and this node should be removed from repo.
+	 * Other value means that only package matching indexed package from other node should be indexed.
+	 */
+	struct node_t *base_node;
 	UT_hash_handle hh;
 };
 
@@ -386,7 +396,43 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
 		const char *curr_public_pkgver = curr_node->packages[SOURCE_PUBLIC].pkgver;
 		const char *curr_stage_pkgver = curr_node->packages[SOURCE_STAGE].pkgver;
-		if (curr_public_pkgver && curr_stage_pkgver) {
+		char *last_dash = strrchr(curr_node->pkgname, '-');
+
+		if (last_dash && strcmp(last_dash, "-dbg") == 0) {
+			// debug packages should be kept in sync with packages they are generated from and not updated on its own pace
+			curr_node->base_node = curr_node;
+			for (enum source source = SOURCE_PUBLIC; source <= SOURCE_STAGE; ++source) {
+				char basepkg[XBPS_MAXPATH] = {0};
+				const char *curr_pkgver = curr_node->packages[source].pkgver;
+				struct node_t *basepkg_node = NULL;
+				unsigned int basepkgname_len = last_dash - curr_node->pkgname;
+				int variable_curr;
+				int variable_source;
+
+				if (!curr_pkgver) {
+					continue;
+				}
+				variable_curr = variable_real_package(curr_pkgver);
+				memcpy(basepkg, curr_pkgver, basepkgname_len);
+				HASH_FIND(hh, group->nodes, basepkg, basepkgname_len, basepkg_node);
+				strcpy(basepkg + basepkgname_len, curr_pkgver + basepkgname_len + 4);
+				if (!basepkg_node || ((!basepkg_node->packages[SOURCE_PUBLIC].pkgver || strcmp(basepkg_node->packages[SOURCE_PUBLIC].pkgver, basepkg) != 0) && (!basepkg_node->packages[SOURCE_STAGE].pkgver || strcmp(basepkg_node->packages[SOURCE_STAGE].pkgver, basepkg) != 0))) {
+					if (explaining) {
+						add_text_clause(group, xbps_xasprintf("%s → ⊥", curr_pkgver), 1);
+					}
+					picosat_add_arg(solver, -variable_curr, 0);
+				} else {
+					curr_node->base_node = basepkg_node;
+					variable_source = variable_real_package(basepkg);
+					if (explaining) {
+						add_text_clause(group, xbps_xasprintf("%s ↔ %s", curr_pkgver, basepkg), 2);
+					}
+					// p ↔ q == (p → q) ∧ (q → p) == (¬p ∨ q) ∧ (¬q ∨ p)
+					picosat_add_arg(solver, -variable_curr, variable_source, 0);
+					picosat_add_arg(solver, -variable_source, variable_curr, 0);
+				}
+			}
+		} else if (curr_public_pkgver && curr_stage_pkgver) {
 			if (strcmp(curr_public_pkgver, curr_stage_pkgver) == 0) {
 				if (explaining) {
 					char *clause = xbps_xasprintf("⊤ → %s", curr_public_pkgver);
@@ -760,9 +806,12 @@ update_repodata(struct repos_group_t *group) {
 				break;
 		}
 		fprintf(stderr, "inconsistent: %d\n", picosat_inconsistent(solver));
+		picosat_reset(solver);
 		explain_inconsistency(group);
 		rv = EPROTO;
 		goto exit;
+	} else {
+		xbps_dbg_printf(group->xhp, "solver decision: satisifiable %d\n", decision);
 	}
 	xbps_dbg_printf(group->xhp, "correcting set: %p\n",correcting);
 	for (;correcting && *correcting; ++correcting) {
@@ -771,7 +820,7 @@ update_repodata(struct repos_group_t *group) {
 		const char *pkgver = variable_name(*correcting);
 
 		xbps_pkg_name(pkgname, sizeof pkgname, pkgver);
-		xbps_dbg_printf(group->xhp, "not updating '%s'\n", pkgver);
+		printf("not updating '%s'\n", pkgver);
 		HASH_FIND(hh, group->nodes, pkgname, strlen(pkgname), node);
 		if (!node) {
 			fprintf(stderr, "No package '%s' (%s) found\n", pkgname, pkgver);
@@ -779,6 +828,35 @@ update_repodata(struct repos_group_t *group) {
 			goto exit;
 		}
 		node->source = SOURCE_PUBLIC;
+	}
+	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
+		const char *base_pkgver = NULL;
+		const char *base_version = NULL;
+
+		if (!curr_node->base_node) {
+			continue;
+		}
+		curr_node->source = SOURCE_NONE;
+		if (curr_node->base_node == curr_node) {
+			continue;
+		}
+		base_pkgver = curr_node->base_node->packages[curr_node->base_node->source].pkgver;
+		if (!base_pkgver) {
+			continue;
+		}
+		base_version = xbps_pkg_version(base_pkgver);
+		for (enum source curr_source = SOURCE_PUBLIC; curr_source <= SOURCE_STAGE; ++curr_source) {
+			const char *curr_pkgver = curr_node->packages[curr_source].pkgver;
+			const char *curr_version = NULL;
+
+			if (!curr_pkgver) {
+				continue;
+			}
+			curr_version = xbps_pkg_version(curr_pkgver);
+			if (base_version && curr_version && strcmp(base_version, curr_version) == 0) {
+				curr_node->source = curr_source;
+			}
+		}
 	}
 exit:
 	picosat_reset(solver);
@@ -804,7 +882,15 @@ write_repos(struct repos_group_t *group, const char *compression, char *repos[])
 		}
 	}
 	for (struct node_t *node = group->nodes; node; node = node->hh.next) {
-		struct package_t *package = &node->packages[node->source];
+		struct package_t *package;
+
+		if (node->source == SOURCE_NONE) {
+			if (node->packages[SOURCE_PUBLIC].pkgver) {
+				printf("Removing '%s'\n", node->packages[SOURCE_PUBLIC].pkgver);
+			}
+			continue;
+		}
+		package = &node->packages[node->source];
 		if (node->source == SOURCE_STAGE) {
 			if (!node->packages[SOURCE_PUBLIC].pkgver) {
 				printf("Adding '%s'\n", package->pkgver);
