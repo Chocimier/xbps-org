@@ -85,7 +85,8 @@ index_remove(struct xbps_handle *xhp, int args, int argmax, char **argv, const c
 		 */
 		assert(pkg);
 		pkgver = xbps_binpkg_pkgver(pkg);
-		if (!xbps_pkg_name(pkgname, sizeof(pkgname), pkgver)) {
+		if (!pkgver || !xbps_pkg_name(pkgname, sizeof(pkgname), pkgver)) {
+			rv = EINVAL;
 			fprintf(stderr, "%s: argument %s doesn't look like path to binary package\n", _XBPS_RINDEX, pkg);
 			free(pkgver);
 			goto out;
