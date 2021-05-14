@@ -782,7 +782,6 @@ exit:
 static int
 update_repodata(struct repos_group_t *group) {
 	int rv = 0;
-	int decision;
 	const int *correcting = NULL;
 	PicoSAT *solver = picosat_init();
 
@@ -792,26 +791,12 @@ update_repodata(struct repos_group_t *group) {
 		goto exit;
 	}
 	correcting = picosat_next_minimal_correcting_subset_of_assumptions(solver);
-	decision = picosat_res(solver);
-	if (decision != PICOSAT_SATISFIABLE) {
-		switch (decision) {
-			case PICOSAT_UNKNOWN:
-				fprintf(stderr, "solver decision: PICOSAT_UNKNOWN\n");
-				break;
-			case PICOSAT_UNSATISFIABLE:
-				fprintf(stderr, "solver decision: PICOSAT_UNSATISFIABLE\n");
-				break;
-			default:
-				fprintf(stderr, "solver decision: %d\n", decision);
-				break;
-		}
-		fprintf(stderr, "inconsistent: %d\n", picosat_inconsistent(solver));
+	if (!correcting) {
+		fprintf(stderr, "Repodata is inconsistent and no updates in stagedata fix it\n");
 		picosat_reset(solver);
 		explain_inconsistency(group);
 		rv = EPROTO;
 		goto exit;
-	} else {
-		xbps_dbg_printf(group->xhp, "solver decision: satisifiable %d\n", decision);
 	}
 	xbps_dbg_printf(group->xhp, "correcting set: %p\n",correcting);
 	for (;correcting && *correcting; ++correcting) {
