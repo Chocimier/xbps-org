@@ -701,6 +701,9 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 
 static int
 explain_inconsistency(struct repos_group_t *group) {
+	// In picosat 965, picosat_coreclause is documented to not interact well with picosat_assume.
+	// Therefore constraints are generated second time, without assumptions.
+	// This allows, as bonus, to skip allocating text clauses on fast track.
 	PicoSAT *solver = picosat_init();
 	int rv = 0;
 	int decision;
