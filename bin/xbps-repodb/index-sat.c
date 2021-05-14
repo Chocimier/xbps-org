@@ -141,6 +141,7 @@ static const char*
 variable_name(int number) {
 	struct variable_t *holder = NULL;
 
+	number = abs(number);
 	number -= number % VARIABLE_NUMBER_STEP;
 	HASH_FIND(hh_by_number, variables_by_number, &number, sizeof(number), holder);
 	return (holder ? holder->str : NULL);
