@@ -393,6 +393,7 @@ exit:
 static int
 generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaining) {
 	int rv = 0;
+	bool print_clauses = explaining || (group->xhp->flags & XBPS_FLAG_DEBUG);
 	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
 		const char *curr_public_pkgver = curr_node->packages[SOURCE_PUBLIC].pkgver;
 		const char *curr_stage_pkgver = curr_node->packages[SOURCE_STAGE].pkgver;
@@ -417,14 +418,14 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				HASH_FIND(hh, group->nodes, basepkg, basepkgname_len, basepkg_node);
 				strcpy(basepkg + basepkgname_len, curr_pkgver + basepkgname_len + 4);
 				if (!basepkg_node || ((!basepkg_node->packages[SOURCE_PUBLIC].pkgver || strcmp(basepkg_node->packages[SOURCE_PUBLIC].pkgver, basepkg) != 0) && (!basepkg_node->packages[SOURCE_STAGE].pkgver || strcmp(basepkg_node->packages[SOURCE_STAGE].pkgver, basepkg) != 0))) {
-					if (explaining) {
+					if (print_clauses) {
 						add_text_clause(group, xbps_xasprintf("%s → ⊥", curr_pkgver), 1);
 					}
 					picosat_add_arg(solver, -variable_curr, 0);
 				} else {
 					curr_node->base_node = basepkg_node;
 					variable_source = variable_real_package(basepkg);
-					if (explaining) {
+					if (print_clauses) {
 						add_text_clause(group, xbps_xasprintf("%s ↔ %s", curr_pkgver, basepkg), 2);
 					}
 					// p ↔ q == (p → q) ∧ (q → p) == (¬p ∨ q) ∧ (¬q ∨ p)
@@ -434,7 +435,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 			}
 		} else if (curr_public_pkgver && curr_stage_pkgver) {
 			if (strcmp(curr_public_pkgver, curr_stage_pkgver) == 0) {
-				if (explaining) {
+				if (print_clauses) {
 					char *clause = xbps_xasprintf("⊤ → %s", curr_public_pkgver);
 					add_text_clause(group, clause, 1);
 				}
@@ -443,7 +444,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				int public_variable = variable_real_package(curr_public_pkgver);
 				int stage_variable = variable_real_package(curr_stage_pkgver);
 
-				if (explaining) {
+				if (print_clauses) {
 					char *clause = xbps_xasprintf("%s ↔ ¬ %s", curr_public_pkgver, curr_stage_pkgver);
 					add_text_clause(group, clause, 2);
 				}
@@ -477,7 +478,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 			for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
 				const char *shlib = NULL;
 				xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
-				if (explaining) {
+				if (print_clauses) {
 					char *clause = xbps_xasprintf("%s → %s", curr_package->pkgver, shlib);
 					add_text_clause(group, clause, 1);
 				}
@@ -503,7 +504,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 					continue;
 				}
 
-				if (explaining) {
+				if (print_clauses) {
 					clause = xbps_xasprintf("%s → (", curr_package->pkgver);
 				}
 				picosat_add(solver, -variable_real_package(curr_package->pkgver));
@@ -516,7 +517,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 						const char *dep_public_pkgver = dep_node->packages[SOURCE_PUBLIC].pkgver;
 						const char *dep_stage_pkgver = dep_node->packages[SOURCE_STAGE].pkgver;
 						if (dep_public_pkgver && xbps_pkgpattern_match(dep_public_pkgver, deppattern)) {
-							if (explaining) {
+							if (print_clauses) {
 								clause_part = clause;
 								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_public_pkgver);
 								free(clause_part);
@@ -524,7 +525,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 							picosat_add(solver, variable_virtual_package(dep_public_pkgver));
 						}
 						if (dep_stage_pkgver && (!dep_public_pkgver || (strcmp(dep_public_pkgver, dep_stage_pkgver) != 0) ) && xbps_pkgpattern_match(dep_stage_pkgver, deppattern)) {
-							if (explaining) {
+							if (print_clauses) {
 								clause_part = clause;
 								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_stage_pkgver);
 								free(clause_part);
@@ -545,7 +546,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 							const char *virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, keysym));
 							if (xbps_pkgpattern_match(virtual, deppattern)) {
 								const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
-								if (explaining) {
+								if (print_clauses) {
 									clause_part = clause;
 									clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, provider);
 									free(clause_part);
@@ -556,7 +557,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 						xbps_object_iterator_release(iter);
 					}
 				}
-				if (explaining) {
+				if (print_clauses) {
 					clause_part = clause;
 					clause = xbps_xasprintf("%s⊥) {%s}", clause_part, deppattern);
 					free(clause_part);
@@ -578,7 +579,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				// p ↔ (q ∨ r) == (1.) ∧ (2.)
 				// 1. p → (q ∨ r) == ¬p ∨ q ∨ r
 				// 2. (q ∨ r) → p == (q → p) ∧ (r → p) == (¬q ∨ p) ∧ (¬r ∨ p)
-				if (explaining) {
+				if (print_clauses) {
 					clause = xbps_xasprintf("virt(%s) ↔ (%s", curr_package->pkgver, curr_package->pkgver);
 					copies_count = 2;
 				}
@@ -595,7 +596,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 							const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
 							int provider_variable = variable_real_package(provider);
 
-							if (explaining) {
+							if (print_clauses) {
 								clause_part = clause;
 								clause = xbps_xasprintf("%s ∨ %s", clause_part, provider);
 								free(clause_part);
@@ -607,7 +608,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 					}
 					xbps_object_iterator_release(iter);
 				}
-				if (explaining) {
+				if (print_clauses) {
 					clause_part = clause;
 					clause = xbps_xasprintf("%s)", clause_part);
 					free(clause_part);
@@ -659,7 +660,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				}
 				// virtual package on left side + providers + terminator
 				provider_variables = calloc(xbps_dictionary_count(providers) + 2, sizeof *provider_variables);
-				if (explaining) {
+				if (print_clauses) {
 					clause = xbps_xasprintf("virt(%s) ↔ (", outer_virtual);
 					copies_count = 1;
 				}
@@ -671,7 +672,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 					if (strcmp(outer_virtual, inner_virtual) == 0) {
 						int provider_variable = variable_real_package(inner_provider);
 
-						if (explaining) {
+						if (print_clauses) {
 							clause_part = clause;
 							clause = xbps_xasprintf("%s%s ∨ ", clause_part, inner_provider);
 							free(clause_part);
@@ -682,7 +683,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 					}
 				}
 				xbps_object_iterator_release(providers_inner_iter);
-				if (explaining) {
+				if (print_clauses) {
 					clause_part = clause;
 					clause = xbps_xasprintf("%s⊥)", clause_part);
 					free(clause_part);
@@ -712,7 +713,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 			int copies_count = 0;
 			int shlib_variable = variable_shlib(shlib);
 
-			if (explaining) {
+			if (print_clauses) {
 				clause = xbps_xasprintf("%s ↔ (", shlib);
 				copies_count = 1;
 			}
@@ -722,7 +723,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				int provider_variable;
 
 				xbps_array_get_cstring_nocopy(providers, i, &provider);
-				if (explaining) {
+				if (print_clauses) {
 					clause_part = clause;
 					clause = xbps_xasprintf("%s%s ∨ ", clause_part, provider);
 					free(clause_part);
@@ -732,7 +733,7 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				provider_variables[pv_idx++] = provider_variable;
 				picosat_add_arg(solver, -provider_variable, shlib_variable, 0);
 			}
-			if (explaining) {
+			if (print_clauses) {
 				clause_part = clause;
 				clause = xbps_xasprintf("%s⊥)", clause_part);
 				free(clause_part);
