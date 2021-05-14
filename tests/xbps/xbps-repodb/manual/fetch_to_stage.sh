@@ -15,7 +15,10 @@ fetch_repo() (
 	tar xf tmp
 	tar -zcf x86_64-stagedata index.plist index-meta.plist
 	mv x86_64-stagedata "$dir"
-	# cp -v tmp /srv/static/$(echo $url | sed s,$MIRROR,,)
+	if [ "$REPO_CACHE_DIR" ]; then
+		mkdir -p $REPO_CACHE_DIR/$(dirname $url | sed s,$MIRROR,,)
+		cp -v tmp $REPO_CACHE_DIR/$(echo $url | sed s,$MIRROR,,)
+	fi
 	rm -r "$tmpdir"
 )
 
