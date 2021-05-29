@@ -390,349 +390,307 @@ exit:
 	return rv;
 }
 
-static int
-generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaining) {
-	int rv = 0;
-	bool print_clauses = explaining || (group->xhp->flags & XBPS_FLAG_DEBUG);
-	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
-		const char *curr_public_pkgver = curr_node->packages[SOURCE_PUBLIC].pkgver;
-		const char *curr_stage_pkgver = curr_node->packages[SOURCE_STAGE].pkgver;
-		char *last_dash = strrchr(curr_node->pkgname, '-');
+static void
+generate_constraints_add_update_remove(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, bool explaining, struct node_t *curr_node)
+{
+	const char *curr_public_pkgver = curr_node->packages[SOURCE_PUBLIC].pkgver;
+	const char *curr_stage_pkgver = curr_node->packages[SOURCE_STAGE].pkgver;
+	char *last_dash = strrchr(curr_node->pkgname, '-');
 
-		if (last_dash && strcmp(last_dash, "-dbg") == 0) {
-			// debug packages should be kept in sync with packages they are generated from and not updated on its own pace
-			curr_node->base_node = curr_node;
-			for (enum source source = SOURCE_PUBLIC; source <= SOURCE_STAGE; ++source) {
-				char basepkg[XBPS_MAXPATH] = {0};
-				const char *curr_pkgver = curr_node->packages[source].pkgver;
-				struct node_t *basepkg_node = NULL;
-				unsigned int basepkgname_len = last_dash - curr_node->pkgname;
-				int variable_curr;
-				int variable_source;
-
-				if (!curr_pkgver) {
-					continue;
-				}
-				variable_curr = variable_real_package(curr_pkgver);
-				memcpy(basepkg, curr_pkgver, basepkgname_len);
-				HASH_FIND(hh, group->nodes, basepkg, basepkgname_len, basepkg_node);
-				strcpy(basepkg + basepkgname_len, curr_pkgver + basepkgname_len + 4);
-				if (!basepkg_node || ((!basepkg_node->packages[SOURCE_PUBLIC].pkgver || strcmp(basepkg_node->packages[SOURCE_PUBLIC].pkgver, basepkg) != 0) && (!basepkg_node->packages[SOURCE_STAGE].pkgver || strcmp(basepkg_node->packages[SOURCE_STAGE].pkgver, basepkg) != 0))) {
-					if (print_clauses) {
-						add_text_clause(group, xbps_xasprintf("%s → ⊥", curr_pkgver), 1);
-					}
-					picosat_add_arg(solver, -variable_curr, 0);
-				} else {
-					curr_node->base_node = basepkg_node;
-					variable_source = variable_real_package(basepkg);
-					if (print_clauses) {
-						add_text_clause(group, xbps_xasprintf("%s ↔ %s", curr_pkgver, basepkg), 2);
-					}
-					// p ↔ q == (p → q) ∧ (q → p) == (¬p ∨ q) ∧ (¬q ∨ p)
-					picosat_add_arg(solver, -variable_curr, variable_source, 0);
-					picosat_add_arg(solver, -variable_source, variable_curr, 0);
-				}
-			}
-		} else if (curr_public_pkgver && curr_stage_pkgver) {
-			if (strcmp(curr_public_pkgver, curr_stage_pkgver) == 0) {
-				if (print_clauses) {
-					char *clause = xbps_xasprintf("⊤ → %s", curr_public_pkgver);
-					add_text_clause(group, clause, 1);
-				}
-				picosat_add_arg(solver, variable_real_package(curr_public_pkgver), 0);
-			} else {
-				int public_variable = variable_real_package(curr_public_pkgver);
-				int stage_variable = variable_real_package(curr_stage_pkgver);
-
-				if (print_clauses) {
-					char *clause = xbps_xasprintf("%s ↔ ¬ %s", curr_public_pkgver, curr_stage_pkgver);
-					add_text_clause(group, clause, 2);
-				}
-				// p ↔ ¬q == (p → ¬q) ∧ (¬q → p) == (¬p ∨ ¬q) ∧ (q ∨ p)
-				picosat_add_arg(solver, public_variable, stage_variable, 0);
-				picosat_add_arg(solver, -public_variable, -stage_variable, 0);
-				if (!explaining) {
-					picosat_assume(solver, stage_variable);
-				}
-			}
-		} else if (curr_public_pkgver) {
-			if (!explaining) {
-				picosat_assume(solver, -variable_real_package(curr_public_pkgver));
-			}
-		} else if (curr_stage_pkgver) {
-			if (!explaining) {
-				picosat_assume(solver, variable_real_package(curr_stage_pkgver));
-			}
-		}
-
+	if (last_dash && strcmp(last_dash, "-dbg") == 0) {
+		// debug packages should be kept in sync with packages they are generated from and not updated on its own pace
+		curr_node->base_node = curr_node;
 		for (enum source source = SOURCE_PUBLIC; source <= SOURCE_STAGE; ++source) {
-			struct package_t *curr_package = &curr_node->packages[source];
-			xbps_array_t shlib_requires = NULL;
-			xbps_array_t run_depends = NULL;
+			char basepkg[XBPS_MAXPATH] = {0};
+			const char *curr_pkgver = curr_node->packages[source].pkgver;
+			struct node_t *basepkg_node = NULL;
+			unsigned int basepkgname_len = last_dash - curr_node->pkgname;
+			int variable_curr;
+			int variable_source;
 
-			if (!curr_package->pkgver) {
+			if (!curr_pkgver) {
 				continue;
 			}
-
-			shlib_requires = xbps_dictionary_get(curr_package->dict, "shlib-requires");
-			for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
-				const char *shlib = NULL;
-				xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
+			variable_curr = variable_real_package(curr_pkgver);
+			memcpy(basepkg, curr_pkgver, basepkgname_len);
+			HASH_FIND(hh, group->nodes, basepkg, basepkgname_len, basepkg_node);
+			strcpy(basepkg + basepkgname_len, curr_pkgver + basepkgname_len + 4);
+			if (!basepkg_node || ((!basepkg_node->packages[SOURCE_PUBLIC].pkgver || strcmp(basepkg_node->packages[SOURCE_PUBLIC].pkgver, basepkg) != 0) && (!basepkg_node->packages[SOURCE_STAGE].pkgver || strcmp(basepkg_node->packages[SOURCE_STAGE].pkgver, basepkg) != 0))) {
 				if (print_clauses) {
-					char *clause = xbps_xasprintf("%s → %s", curr_package->pkgver, shlib);
-					add_text_clause(group, clause, 1);
+					add_text_clause(group, xbps_xasprintf("%s → ⊥", curr_pkgver), 1);
 				}
-				picosat_add_arg(solver, -variable_real_package(curr_package->pkgver), variable_shlib(shlib), 0);
-			}
-
-			run_depends = xbps_dictionary_get(curr_package->dict, "run_depends");
-			for (unsigned int i = 0; i < xbps_array_count(run_depends); i++) {
-				const char *deppattern = NULL;
-				char *clause = NULL;
-				char *clause_part = NULL;
-				char depname[XBPS_NAME_SIZE];
-				bool ok = false;
-
-				xbps_array_get_cstring_nocopy(run_depends, i, &deppattern);
-				ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
-				if (!ok) {
-					ok = xbps_pkg_name(depname, sizeof depname, deppattern);
-				}
-				if (!ok) {
-					fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_package->pkgver, deppattern);
-					rv = ENXIO;
-					continue;
-				}
-
+				picosat_add_arg(solver, -variable_curr, 0);
+			} else {
+				curr_node->base_node = basepkg_node;
+				variable_source = variable_real_package(basepkg);
 				if (print_clauses) {
-					clause = xbps_xasprintf("%s → (", curr_package->pkgver);
+					add_text_clause(group, xbps_xasprintf("%s ↔ %s", curr_pkgver, basepkg), 2);
 				}
-				picosat_add(solver, -variable_real_package(curr_package->pkgver));
-				{
-					struct node_t *dep_node = NULL;
-
-					HASH_FIND(hh, group->nodes, depname, strlen(depname), dep_node);
-
-					if (dep_node) {
-						const char *dep_public_pkgver = dep_node->packages[SOURCE_PUBLIC].pkgver;
-						const char *dep_stage_pkgver = dep_node->packages[SOURCE_STAGE].pkgver;
-						if (dep_public_pkgver && xbps_pkgpattern_match(dep_public_pkgver, deppattern)) {
-							if (print_clauses) {
-								clause_part = clause;
-								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_public_pkgver);
-								free(clause_part);
-							}
-							picosat_add(solver, variable_virtual_package(dep_public_pkgver));
-						}
-						if (dep_stage_pkgver && (!dep_public_pkgver || (strcmp(dep_public_pkgver, dep_stage_pkgver) != 0) ) && xbps_pkgpattern_match(dep_stage_pkgver, deppattern)) {
-							if (print_clauses) {
-								clause_part = clause;
-								clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_stage_pkgver);
-								free(clause_part);
-							}
-							picosat_add(solver, variable_virtual_package(dep_stage_pkgver));
-						}
-					}
-				}
-				{
-					xbps_dictionary_t providers = xbps_dictionary_get(group->virtual_providers, depname);
-
-					if (providers) {
-						xbps_object_iterator_t iter = NULL;
-						xbps_dictionary_keysym_t keysym = NULL;
-
-						iter = xbps_dictionary_iterator(providers);
-						while ((keysym = xbps_object_iterator_next(iter))) {
-							const char *virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, keysym));
-							if (xbps_pkgpattern_match(virtual, deppattern)) {
-								const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
-								if (print_clauses) {
-									clause_part = clause;
-									clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, provider);
-									free(clause_part);
-								}
-								picosat_add(solver, variable_virtual_package(provider));
-							}
-						}
-						xbps_object_iterator_release(iter);
-					}
-				}
-				if (print_clauses) {
-					clause_part = clause;
-					clause = xbps_xasprintf("%s⊥) {%s}", clause_part, deppattern);
-					free(clause_part);
-					add_text_clause(group, clause, 1);
-				}
-				picosat_add(solver, 0);
-			}
-			{
-				xbps_dictionary_t providers = xbps_dictionary_get(group->virtual_providers, curr_node->pkgname);
-				// virtual package on left side + real package on right side + providers + terminator
-				int *provider_variables = calloc(xbps_dictionary_count(providers) + 3, sizeof *provider_variables);
-				char *clause = NULL;
-				char *clause_part = NULL;
-				int pv_idx = 0;
-				int copies_count = 0;
-				int curr_package_real_variable = variable_real_package(curr_package->pkgver);
-				int curr_package_virtual_variable = variable_virtual_from_real(curr_package_real_variable);
-
-				// p ↔ (q ∨ r) == (1.) ∧ (2.)
-				// 1. p → (q ∨ r) == ¬p ∨ q ∨ r
-				// 2. (q ∨ r) → p == (q → p) ∧ (r → p) == (¬q ∨ p) ∧ (¬r ∨ p)
-				if (print_clauses) {
-					clause = xbps_xasprintf("virt(%s) ↔ (%s", curr_package->pkgver, curr_package->pkgver);
-					copies_count = 2;
-				}
-				provider_variables[pv_idx++] = -curr_package_virtual_variable;
-				provider_variables[pv_idx++] = curr_package_real_variable;
-				picosat_add_arg(solver, -curr_package_real_variable, curr_package_virtual_variable, 0);
-				if (providers) {
-					xbps_object_iterator_t iter = xbps_dictionary_iterator(providers);
-					xbps_dictionary_keysym_t keysym = NULL;
-
-					while ((keysym = xbps_object_iterator_next(iter))) {
-						const char *virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, keysym));
-						if (strcmp(curr_package->pkgver, virtual) == 0) {
-							const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
-							int provider_variable = variable_real_package(provider);
-
-							if (print_clauses) {
-								clause_part = clause;
-								clause = xbps_xasprintf("%s ∨ %s", clause_part, provider);
-								free(clause_part);
-								++copies_count;
-							}
-							provider_variables[pv_idx++] = provider_variable;
-							picosat_add_arg(solver, -provider_variable, curr_package_virtual_variable, 0);
-						}
-					}
-					xbps_object_iterator_release(iter);
-				}
-				if (print_clauses) {
-					clause_part = clause;
-					clause = xbps_xasprintf("%s)", clause_part);
-					free(clause_part);
-					add_text_clause(group, clause, copies_count);
-				}
-				picosat_add_lits(solver, provider_variables);
-				free(provider_variables);
+				// p ↔ q == (p → q) ∧ (q → p) == (¬p ∨ q) ∧ (¬q ∨ p)
+				picosat_add_arg(solver, -variable_curr, variable_source, 0);
+				picosat_add_arg(solver, -variable_source, variable_curr, 0);
 			}
 		}
+	} else if (curr_public_pkgver && curr_stage_pkgver) {
+		if (strcmp(curr_public_pkgver, curr_stage_pkgver) == 0) {
+			if (print_clauses) {
+				char *clause = xbps_xasprintf("⊤ → %s", curr_public_pkgver);
+				add_text_clause(group, clause, 1);
+			}
+			picosat_add_arg(solver, variable_real_package(curr_public_pkgver), 0);
+		} else {
+			int public_variable = variable_real_package(curr_public_pkgver);
+			int stage_variable = variable_real_package(curr_stage_pkgver);
+
+			if (print_clauses) {
+				char *clause = xbps_xasprintf("%s ↔ ¬ %s", curr_public_pkgver, curr_stage_pkgver);
+				add_text_clause(group, clause, 2);
+			}
+			// p ↔ ¬q == (p → ¬q) ∧ (¬q → p) == (¬p ∨ ¬q) ∧ (q ∨ p)
+			picosat_add_arg(solver, public_variable, stage_variable, 0);
+			picosat_add_arg(solver, -public_variable, -stage_variable, 0);
+			if (!explaining) {
+				picosat_assume(solver, stage_variable);
+			}
+		}
+	} else if (curr_public_pkgver) {
+		if (!explaining) {
+			picosat_assume(solver, -variable_real_package(curr_public_pkgver));
+		}
+	} else if (curr_stage_pkgver) {
+		if (!explaining) {
+			picosat_assume(solver, variable_real_package(curr_stage_pkgver));
+		}
 	}
-	{
-		xbps_object_iterator_t virtual_pkgs_iter = xbps_dictionary_iterator(group->virtual_providers);
-		xbps_dictionary_keysym_t virtual_pkgs_keysym = NULL;
+}
 
-		while ((virtual_pkgs_keysym = xbps_object_iterator_next(virtual_pkgs_iter))) {
-			const char *virtual_pkgname = xbps_dictionary_keysym_cstring_nocopy(virtual_pkgs_keysym);
-			xbps_dictionary_t providers = xbps_dictionary_get_keysym(group->virtual_providers, virtual_pkgs_keysym);
-			xbps_dictionary_t processed_pkgvers = xbps_dictionary_create();
-			struct node_t *realpkg_node = NULL;
-			xbps_object_iterator_t providers_outer_iter = NULL;
-			xbps_dictionary_keysym_t providers_outer_keysym = NULL;
+static void
+generate_constraints_shlib_requires(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct package_t *curr_package)
+{
+	xbps_array_t shlib_requires = NULL;
 
-			HASH_FIND(hh, group->nodes, virtual_pkgname, strlen(virtual_pkgname), realpkg_node);
+	shlib_requires = xbps_dictionary_get(curr_package->dict, "shlib-requires");
+	for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
+		const char *shlib = NULL;
+		xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
+		if (print_clauses) {
+			char *clause = xbps_xasprintf("%s → %s", curr_package->pkgver, shlib);
+			add_text_clause(group, clause, 1);
+		}
+		picosat_add_arg(solver, -variable_real_package(curr_package->pkgver), variable_shlib(shlib), 0);
+	}
+}
 
-			if (realpkg_node) {
-				if (realpkg_node->packages[SOURCE_PUBLIC].pkgver) {
-					xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->packages[SOURCE_PUBLIC].pkgver, true);
+static int
+generate_constraints_depends(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct package_t *curr_package)
+{
+	xbps_array_t run_depends = NULL;
+	int rv = 0;
+
+	run_depends = xbps_dictionary_get(curr_package->dict, "run_depends");
+	for (unsigned int i = 0; i < xbps_array_count(run_depends); i++) {
+		const char *deppattern = NULL;
+		char *clause = NULL;
+		char *clause_part = NULL;
+		char depname[XBPS_NAME_SIZE];
+		bool ok = false;
+
+		xbps_array_get_cstring_nocopy(run_depends, i, &deppattern);
+		ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
+		if (!ok) {
+			ok = xbps_pkg_name(depname, sizeof depname, deppattern);
+		}
+		if (!ok) {
+			fprintf(stderr, "'%s' requires '%s' that has no package name\n", curr_package->pkgver, deppattern);
+			rv = ENXIO;
+			continue;
+		}
+
+		if (print_clauses) {
+			clause = xbps_xasprintf("%s → (", curr_package->pkgver);
+		}
+		picosat_add(solver, -variable_real_package(curr_package->pkgver));
+		{
+			struct node_t *dep_node = NULL;
+
+			HASH_FIND(hh, group->nodes, depname, strlen(depname), dep_node);
+
+			if (dep_node) {
+				const char *dep_public_pkgver = dep_node->packages[SOURCE_PUBLIC].pkgver;
+				const char *dep_stage_pkgver = dep_node->packages[SOURCE_STAGE].pkgver;
+				if (dep_public_pkgver && xbps_pkgpattern_match(dep_public_pkgver, deppattern)) {
+					if (print_clauses) {
+						clause_part = clause;
+						clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_public_pkgver);
+						free(clause_part);
+					}
+					picosat_add(solver, variable_virtual_package(dep_public_pkgver));
 				}
-				if (realpkg_node->packages[SOURCE_STAGE].pkgver) {
-					xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->packages[SOURCE_STAGE].pkgver, true);
+				if (dep_stage_pkgver && (!dep_public_pkgver || (strcmp(dep_public_pkgver, dep_stage_pkgver) != 0) ) && xbps_pkgpattern_match(dep_stage_pkgver, deppattern)) {
+					if (print_clauses) {
+						clause_part = clause;
+						clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, dep_stage_pkgver);
+						free(clause_part);
+					}
+					picosat_add(solver, variable_virtual_package(dep_stage_pkgver));
 				}
 			}
+		}
+		{
+			xbps_dictionary_t providers = xbps_dictionary_get(group->virtual_providers, depname);
 
-			providers_outer_iter = xbps_dictionary_iterator(providers);
-			while ((providers_outer_keysym = xbps_object_iterator_next(providers_outer_iter))) {
-				const char *outer_virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, providers_outer_keysym));
-				xbps_object_iterator_t providers_inner_iter = NULL;
-				xbps_dictionary_keysym_t providers_inner_keysym = NULL;
-				int *provider_variables = NULL;
-				char *clause = NULL;
-				char *clause_part = NULL;
-				int pv_idx = 0;
-				int copies_count = 0;
-				bool dummy_bool = false;
-				int outer_virtual_variable = variable_virtual_package(outer_virtual);
+			if (providers) {
+				xbps_object_iterator_t iter = NULL;
+				xbps_dictionary_keysym_t keysym = NULL;
 
-				if (xbps_dictionary_get_bool(processed_pkgvers, outer_virtual, &dummy_bool)) {
-					continue;
-				}
-				// virtual package on left side + providers + terminator
-				provider_variables = calloc(xbps_dictionary_count(providers) + 2, sizeof *provider_variables);
-				if (print_clauses) {
-					clause = xbps_xasprintf("virt(%s) ↔ (", outer_virtual);
-					copies_count = 1;
-				}
-				provider_variables[pv_idx++] = -outer_virtual_variable;
-				providers_inner_iter = xbps_dictionary_iterator(providers);
-				while ((providers_inner_keysym = xbps_object_iterator_next(providers_inner_iter))) {
-					const char *inner_provider = xbps_dictionary_keysym_cstring_nocopy(providers_inner_keysym);
-					const char *inner_virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, providers_inner_keysym));
-					if (strcmp(outer_virtual, inner_virtual) == 0) {
-						int provider_variable = variable_real_package(inner_provider);
-
+				iter = xbps_dictionary_iterator(providers);
+				while ((keysym = xbps_object_iterator_next(iter))) {
+					const char *virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, keysym));
+					if (xbps_pkgpattern_match(virtual, deppattern)) {
+						const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
 						if (print_clauses) {
 							clause_part = clause;
-							clause = xbps_xasprintf("%s%s ∨ ", clause_part, inner_provider);
+							clause = xbps_xasprintf("%svirt(%s) ∨ ", clause_part, provider);
 							free(clause_part);
-							++copies_count;
 						}
-						provider_variables[pv_idx++] = provider_variable;
-						picosat_add_arg(solver, -provider_variable, outer_virtual_variable, 0);
+						picosat_add(solver, variable_virtual_package(provider));
 					}
 				}
-				xbps_object_iterator_release(providers_inner_iter);
-				if (print_clauses) {
-					clause_part = clause;
-					clause = xbps_xasprintf("%s⊥)", clause_part);
-					free(clause_part);
-					add_text_clause(group, clause, copies_count);
-				}
-				picosat_add_lits(solver, provider_variables);
-				free(provider_variables);
-				xbps_dictionary_set_bool(processed_pkgvers, outer_virtual, true);
+				xbps_object_iterator_release(iter);
 			}
-			xbps_object_iterator_release(providers_outer_iter);
-			xbps_object_release(processed_pkgvers);
 		}
-		xbps_object_iterator_release(virtual_pkgs_iter);
+		if (print_clauses) {
+			clause_part = clause;
+			clause = xbps_xasprintf("%s⊥) {%s}", clause_part, deppattern);
+			free(clause_part);
+			add_text_clause(group, clause, 1);
+		}
+		picosat_add(solver, 0);
 	}
-	{
-		xbps_object_iterator_t iter = xbps_dictionary_iterator(group->shlib_providers);
+	return rv;
+}
+
+static void
+generate_constraints_virtual_or_real(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct node_t *curr_node, struct package_t *curr_package)
+{
+	xbps_dictionary_t providers = xbps_dictionary_get(group->virtual_providers, curr_node->pkgname);
+	// virtual package on left side + real package on right side + providers + terminator
+	int *provider_variables = calloc(xbps_dictionary_count(providers) + 3, sizeof *provider_variables);
+	char *clause = NULL;
+	char *clause_part = NULL;
+	int pv_idx = 0;
+	int copies_count = 0;
+	int curr_package_real_variable = variable_real_package(curr_package->pkgver);
+	int curr_package_virtual_variable = variable_virtual_from_real(curr_package_real_variable);
+
+	// p ↔ (q ∨ r) == (1.) ∧ (2.)
+	// 1. p → (q ∨ r) == ¬p ∨ q ∨ r
+	// 2. (q ∨ r) → p == (q → p) ∧ (r → p) == (¬q ∨ p) ∧ (¬r ∨ p)
+	if (print_clauses) {
+		clause = xbps_xasprintf("virt(%s) ↔ (%s", curr_package->pkgver, curr_package->pkgver);
+		copies_count = 2;
+	}
+	provider_variables[pv_idx++] = -curr_package_virtual_variable;
+	provider_variables[pv_idx++] = curr_package_real_variable;
+	picosat_add_arg(solver, -curr_package_real_variable, curr_package_virtual_variable, 0);
+	if (providers) {
+		xbps_object_iterator_t iter = xbps_dictionary_iterator(providers);
 		xbps_dictionary_keysym_t keysym = NULL;
 
 		while ((keysym = xbps_object_iterator_next(iter))) {
-			const char *shlib = xbps_dictionary_keysym_cstring_nocopy(keysym);
-			xbps_array_t providers = xbps_dictionary_get_keysym(group->shlib_providers, keysym);
-			// library on left side + providers + terminator
-			int *provider_variables = calloc(xbps_array_count(providers) + 2, sizeof *provider_variables);
+			const char *virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, keysym));
+			if (strcmp(curr_package->pkgver, virtual) == 0) {
+				const char *provider = xbps_dictionary_keysym_cstring_nocopy(keysym);
+				int provider_variable = variable_real_package(provider);
+
+				if (print_clauses) {
+					clause_part = clause;
+					clause = xbps_xasprintf("%s ∨ %s", clause_part, provider);
+					free(clause_part);
+					++copies_count;
+				}
+				provider_variables[pv_idx++] = provider_variable;
+				picosat_add_arg(solver, -provider_variable, curr_package_virtual_variable, 0);
+			}
+		}
+		xbps_object_iterator_release(iter);
+	}
+	if (print_clauses) {
+		clause_part = clause;
+		clause = xbps_xasprintf("%s)", clause_part);
+		free(clause_part);
+		add_text_clause(group, clause, copies_count);
+	}
+	picosat_add_lits(solver, provider_variables);
+	free(provider_variables);
+}
+
+static void
+generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver, bool print_clauses)
+{
+	xbps_object_iterator_t virtual_pkgs_iter = xbps_dictionary_iterator(group->virtual_providers);
+	xbps_dictionary_keysym_t virtual_pkgs_keysym = NULL;
+
+	while ((virtual_pkgs_keysym = xbps_object_iterator_next(virtual_pkgs_iter))) {
+		const char *virtual_pkgname = xbps_dictionary_keysym_cstring_nocopy(virtual_pkgs_keysym);
+		xbps_dictionary_t providers = xbps_dictionary_get_keysym(group->virtual_providers, virtual_pkgs_keysym);
+		xbps_dictionary_t processed_pkgvers = xbps_dictionary_create();
+		struct node_t *realpkg_node = NULL;
+		xbps_object_iterator_t providers_outer_iter = NULL;
+		xbps_dictionary_keysym_t providers_outer_keysym = NULL;
+
+		HASH_FIND(hh, group->nodes, virtual_pkgname, strlen(virtual_pkgname), realpkg_node);
+
+		if (realpkg_node) {
+			if (realpkg_node->packages[SOURCE_PUBLIC].pkgver) {
+				xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->packages[SOURCE_PUBLIC].pkgver, true);
+			}
+			if (realpkg_node->packages[SOURCE_STAGE].pkgver) {
+				xbps_dictionary_set_bool(processed_pkgvers, realpkg_node->packages[SOURCE_STAGE].pkgver, true);
+			}
+		}
+
+		providers_outer_iter = xbps_dictionary_iterator(providers);
+		while ((providers_outer_keysym = xbps_object_iterator_next(providers_outer_iter))) {
+			const char *outer_virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, providers_outer_keysym));
+			xbps_object_iterator_t providers_inner_iter = NULL;
+			xbps_dictionary_keysym_t providers_inner_keysym = NULL;
+			int *provider_variables = NULL;
 			char *clause = NULL;
 			char *clause_part = NULL;
 			int pv_idx = 0;
 			int copies_count = 0;
-			int shlib_variable = variable_shlib(shlib);
+			bool dummy_bool = false;
+			int outer_virtual_variable = variable_virtual_package(outer_virtual);
 
+			if (xbps_dictionary_get_bool(processed_pkgvers, outer_virtual, &dummy_bool)) {
+				continue;
+			}
+			// virtual package on left side + providers + terminator
+			provider_variables = calloc(xbps_dictionary_count(providers) + 2, sizeof *provider_variables);
 			if (print_clauses) {
-				clause = xbps_xasprintf("%s ↔ (", shlib);
+				clause = xbps_xasprintf("virt(%s) ↔ (", outer_virtual);
 				copies_count = 1;
 			}
-			provider_variables[pv_idx++] = -shlib_variable;
-			for (unsigned int i = 0; i < xbps_array_count(providers); ++i) {
-				const char *provider = NULL;
-				int provider_variable;
+			provider_variables[pv_idx++] = -outer_virtual_variable;
+			providers_inner_iter = xbps_dictionary_iterator(providers);
+			while ((providers_inner_keysym = xbps_object_iterator_next(providers_inner_iter))) {
+				const char *inner_provider = xbps_dictionary_keysym_cstring_nocopy(providers_inner_keysym);
+				const char *inner_virtual = xbps_string_cstring_nocopy(xbps_dictionary_get_keysym(providers, providers_inner_keysym));
+				if (strcmp(outer_virtual, inner_virtual) == 0) {
+					int provider_variable = variable_real_package(inner_provider);
 
-				xbps_array_get_cstring_nocopy(providers, i, &provider);
-				if (print_clauses) {
-					clause_part = clause;
-					clause = xbps_xasprintf("%s%s ∨ ", clause_part, provider);
-					free(clause_part);
-					++copies_count;
+					if (print_clauses) {
+						clause_part = clause;
+						clause = xbps_xasprintf("%s%s ∨ ", clause_part, inner_provider);
+						free(clause_part);
+						++copies_count;
+					}
+					provider_variables[pv_idx++] = provider_variable;
+					picosat_add_arg(solver, -provider_variable, outer_virtual_variable, 0);
 				}
-				provider_variable = variable_real_package(provider);
-				provider_variables[pv_idx++] = provider_variable;
-				picosat_add_arg(solver, -provider_variable, shlib_variable, 0);
 			}
+			xbps_object_iterator_release(providers_inner_iter);
 			if (print_clauses) {
 				clause_part = clause;
 				clause = xbps_xasprintf("%s⊥)", clause_part);
@@ -741,9 +699,83 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 			}
 			picosat_add_lits(solver, provider_variables);
 			free(provider_variables);
+			xbps_dictionary_set_bool(processed_pkgvers, outer_virtual, true);
 		}
-		xbps_object_iterator_release(iter);
+		xbps_object_iterator_release(providers_outer_iter);
+		xbps_object_release(processed_pkgvers);
 	}
+	xbps_object_iterator_release(virtual_pkgs_iter);
+}
+
+static void
+generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, bool print_clauses)
+{
+	xbps_object_iterator_t iter = xbps_dictionary_iterator(group->shlib_providers);
+	xbps_dictionary_keysym_t keysym = NULL;
+
+	while ((keysym = xbps_object_iterator_next(iter))) {
+		const char *shlib = xbps_dictionary_keysym_cstring_nocopy(keysym);
+		xbps_array_t providers = xbps_dictionary_get_keysym(group->shlib_providers, keysym);
+		// library on left side + providers + terminator
+		int *provider_variables = calloc(xbps_array_count(providers) + 2, sizeof *provider_variables);
+		char *clause = NULL;
+		char *clause_part = NULL;
+		int pv_idx = 0;
+		int copies_count = 0;
+		int shlib_variable = variable_shlib(shlib);
+
+		if (print_clauses) {
+			clause = xbps_xasprintf("%s ↔ (", shlib);
+			copies_count = 1;
+		}
+		provider_variables[pv_idx++] = -shlib_variable;
+		for (unsigned int i = 0; i < xbps_array_count(providers); ++i) {
+			const char *provider = NULL;
+			int provider_variable;
+
+			xbps_array_get_cstring_nocopy(providers, i, &provider);
+			if (print_clauses) {
+				clause_part = clause;
+				clause = xbps_xasprintf("%s%s ∨ ", clause_part, provider);
+				free(clause_part);
+				++copies_count;
+			}
+			provider_variable = variable_real_package(provider);
+			provider_variables[pv_idx++] = provider_variable;
+			picosat_add_arg(solver, -provider_variable, shlib_variable, 0);
+		}
+		if (print_clauses) {
+			clause_part = clause;
+			clause = xbps_xasprintf("%s⊥)", clause_part);
+			free(clause_part);
+			add_text_clause(group, clause, copies_count);
+		}
+		picosat_add_lits(solver, provider_variables);
+		free(provider_variables);
+	}
+	xbps_object_iterator_release(iter);
+}
+
+static int
+generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaining)
+{
+	int rv = 0;
+	bool print_clauses = explaining || (group->xhp->flags & XBPS_FLAG_DEBUG);
+	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
+		generate_constraints_add_update_remove(group, solver, print_clauses, explaining, curr_node);
+		for (enum source source = SOURCE_PUBLIC; source <= SOURCE_STAGE; ++source) {
+			struct package_t *curr_package = &curr_node->packages[source];
+
+			if (!curr_package->pkgver) {
+				continue;
+			}
+			generate_constraints_shlib_requires(group, solver, print_clauses, curr_package);
+			rv |= generate_constraints_depends(group, solver, print_clauses, curr_package);
+			generate_constraints_virtual_or_real(group, solver, print_clauses, curr_node, curr_package);
+		}
+	}
+	generate_constraints_virtual_pure(group, solver, print_clauses);
+	generate_constraints_shlib_provides(group, solver, print_clauses);
 	return rv;
 }
 
@@ -796,8 +828,7 @@ update_repodata(struct repos_group_t *group) {
 		fprintf(stderr, "Repodata is inconsistent and no updates in stagedata fix it\n");
 		picosat_reset(solver);
 		explain_inconsistency(group);
-		rv = EPROTO;
-		goto exit;
+		return EPROTO;
 	}
 	xbps_dbg_printf(group->xhp, "correcting set: %p\n",correcting);
 	for (;correcting && *correcting; ++correcting) {
