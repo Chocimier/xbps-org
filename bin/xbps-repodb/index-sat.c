@@ -60,7 +60,7 @@ struct repo_t {
 struct repos_group_t {
 	struct node_t *nodes;
 	/**
-	 * key is pkgname of solib name, value is array of pkgvers providing it
+	 * key is solib name, value is array of pkgvers providing it
 	 */
 	xbps_dictionary_t shlib_providers;
 	/**
@@ -72,6 +72,7 @@ struct repos_group_t {
 	/** array of pairs of repo_t */
 	struct repo_t (*repos)[2];
 	xbps_array_t text_clauses;
+	xbps_dictionary_t processed_providers;
 	struct xbps_handle *xhp;
 };
 
@@ -213,6 +214,7 @@ repo_group_init(struct repos_group_t *group, struct xbps_handle *xhp, int repos_
 	group->repos_count = repos_count;
 	group->repos = calloc(group->repos_count, sizeof *group->repos);
 	group->text_clauses = xbps_array_create();
+	group->processed_providers = xbps_dictionary_create();
 	group->xhp = xhp;
 }
 
@@ -231,6 +233,7 @@ repo_group_release(struct repos_group_t *group) {
 	}
 	free(group->repos);
 	xbps_object_release(group->text_clauses);
+	xbps_object_release(group->processed_providers);
 }
 
 static int
@@ -708,22 +711,26 @@ generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver, 
 }
 
 static void
-generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, bool print_clauses)
+generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct package_t *curr_package)
 {
-	xbps_object_iterator_t iter = xbps_dictionary_iterator(group->shlib_providers);
-	xbps_dictionary_keysym_t keysym = NULL;
+	xbps_array_t shlib_requires = xbps_dictionary_get(curr_package->dict, "shlib-requires");
 
-	while ((keysym = xbps_object_iterator_next(iter))) {
-		const char *shlib = xbps_dictionary_keysym_cstring_nocopy(keysym);
-		xbps_array_t providers = xbps_dictionary_get_keysym(group->shlib_providers, keysym);
-		// library on left side + providers + terminator
-		int *provider_variables = calloc(xbps_array_count(providers) + 2, sizeof *provider_variables);
+	for (unsigned int j = 0; j < xbps_array_count(shlib_requires); ++j) {
+		const char *shlib = xbps_string_cstring_nocopy(xbps_array_get(shlib_requires, j));
+		xbps_array_t providers = xbps_dictionary_get(group->shlib_providers, shlib);
+		int *provider_variables = NULL;
 		char *clause = NULL;
 		char *clause_part = NULL;
 		int pv_idx = 0;
 		int copies_count = 0;
 		int shlib_variable = variable_shlib(shlib);
 
+		if (xbps_dictionary_get(group->processed_providers, shlib)) {
+			continue;
+		}
+		xbps_dictionary_set_bool(group->processed_providers, shlib, true);
+		// library on left side + providers + terminator
+		provider_variables = calloc(xbps_array_count(providers) + 2, sizeof *provider_variables);
 		if (print_clauses) {
 			clause = xbps_xasprintf("%s ↔ (", shlib);
 			copies_count = 1;
@@ -753,7 +760,6 @@ generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver
 		picosat_add_lits(solver, provider_variables);
 		free(provider_variables);
 	}
-	xbps_object_iterator_release(iter);
 }
 
 static int
@@ -770,12 +776,12 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaini
 				continue;
 			}
 			generate_constraints_shlib_requires(group, solver, print_clauses, curr_package);
+			generate_constraints_shlib_provides(group, solver, print_clauses, curr_package);
 			rv |= generate_constraints_depends(group, solver, print_clauses, curr_package);
 			generate_constraints_virtual_or_real(group, solver, print_clauses, curr_node, curr_package);
 		}
 	}
 	generate_constraints_virtual_pure(group, solver, print_clauses);
-	generate_constraints_shlib_provides(group, solver, print_clauses);
 	return rv;
 }
 
