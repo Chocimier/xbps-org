@@ -18,10 +18,10 @@ update_body() {
 	atf_check_equal s$? s0
 	xbps-create -A noarch -n commB-1.0_1 -s "pkg B" --shlib-requires "libfoo.so.1" ../pkg
 	atf_check_equal d$? d0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal f$? f0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" commA-1.0_1
@@ -30,20 +30,20 @@ update_body() {
 
 	xbps-create -A noarch -n lib-1.10_1 -s "lib pkg" --shlib-provides "libfoo.so.2" ../pkg
 	atf_check_equal z$? z0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal x$? x0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	mv stagedata.moved $stagedata
 
 	xbps-create -A noarch -n commB-2.0_1 -s "pkg B" --shlib-requires "libfoo.so.2" ../pkg
 	atf_check_equal c$? c0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal v$? v0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commB)" commB-1.0_1
@@ -51,12 +51,11 @@ update_body() {
 
 	xbps-create -A noarch -n commA-1.1_1 -s "pkg A" --shlib-requires "libfoo.so.2" ../pkg
 	atf_check_equal b$? b0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal n$? n0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
-	test ! -f $stagedata
-	atf_check_equal m$? m0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
+	rm $stagedata # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.10_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" commA-1.1_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commB)" commB-2.0_1
@@ -67,18 +66,16 @@ nonexistent_requires_head() {
 }
 
 nonexistent_requires_body() {
-	atf_expect_fail "Not implemented"
-
 	stagedata=$(xbps-uhelper arch)-stagedata
 	mkdir -p some_repo pkg root
 	touch pkg/file00
 	cd some_repo
 	xbps-create -A noarch -n lib-1.0_1 -s "lib pkg" --shlib-provides "libfoo.so.1" ../pkg
 	atf_check_equal a$? a0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal s$? s0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" ""
@@ -86,13 +83,12 @@ nonexistent_requires_body() {
 
 	xbps-create -A noarch -n commA-1.0_1 -s "pkg A" --shlib-requires "libbaz.so.1" ../pkg
 	atf_check_equal d$? d0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal f$? f0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
-	#fails here
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" ""
 	mv stagedata.moved $stagedata
 }
@@ -102,8 +98,6 @@ library_advanced_head() {
 }
 
 library_advanced_body() {
-	atf_expect_fail "Not implemented"
-
 	stagedata=$(xbps-uhelper arch)-stagedata
 	mkdir -p some_repo pkg root
 	touch pkg/file00
@@ -114,10 +108,10 @@ library_advanced_body() {
 	atf_check_equal s$? s0
 	xbps-create -A noarch -n commB-1.0_1 -s "pkg B" --shlib-requires "libfoo.so.1" ../pkg
 	atf_check_equal d$? d0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal f$? f0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" "commA-1.0_1"
@@ -128,10 +122,10 @@ library_advanced_body() {
 	atf_check_equal q$? q0
 	xbps-create -A noarch -n commA-1.0_2 -s "pkg A" --shlib-requires "libfoo.so.2" ../pkg
 	atf_check_equal w$? w0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal e$? e0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" "commA-1.0_1"
@@ -142,10 +136,10 @@ library_advanced_body() {
 	atf_check_equal y$? y0
 	xbps-create -A noarch -n commA-1.0_2 -s "pkg A" --shlib-requires "libfoo.so.2" ../pkg
 	atf_check_equal u$? u0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal i$? i0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
 	atf_check_equal "$(xbps-query --repository=. -p pkgver commA)" "commA-1.0_1"
@@ -156,7 +150,7 @@ library_advanced_body() {
 	atf_check_equal z$? z0
 	xbps-create -A noarch -n commB-1.0_2 -s "pkg B" --shlib-requires "libfoo.so.3" ../pkg
 	atf_check_equal x$? x0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal c$? c0
 	xbps-repodb --index $PWD
 	atf_check_equal $? 0
@@ -182,10 +176,10 @@ library_split_body() {
 	atf_check_equal a$? a0
 	xbps-create -A noarch -n commA-1.0_1 -s "pkg A" --shlib-requires "libfoonum.so.1" -D 'lib>=1.0_1' ../pkg
 	atf_check_equal s$? s0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal d$? d0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	xbps-install -n commA --repository .
 	atf_check_equal f$? f0
 
@@ -195,10 +189,10 @@ library_split_body() {
 	atf_check_equal w$? w0
 	xbps-create -A noarch -n libnum-1.0_2 -s "lib pkg, num part" --shlib-provides "libfoonum.so.1" ../pkg
 	atf_check_equal e$? e0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal r$? r0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	xbps-install -n commA --repository .
 	#fails here
 	atf_check_equal t$? t0
@@ -219,7 +213,7 @@ move_between_repos_body() {
 	atf_check_equal a$? a0
 	xbps-create -A ${arch} -n commA-1.0_1 -s "pkg A" --shlib-requires "libfoonum.so.1" -D 'lib>=1.0_1' ../pkg
 	atf_check_equal s$? s0
-	xbps-rindex -a $PWD/*.xbps
+	xbps-rindex --stage -a $PWD/*.xbps
 	atf_check_equal d$? d0
 	atf_check_equal $? 0
 	cd ..
@@ -228,17 +222,18 @@ move_between_repos_body() {
 	atf_check_equal $? 0
 	xbps-create -A ${arch} -n lib-1.1_1 -s "lib pkg" --shlib-provides "libfoonet.so.4 libfoonum.so.1" ../pkg
 	atf_check_equal $? 0
-	xbps-rindex -a $PWD/*.xbps
-	atf_check_equal $? 0
-	mv ${repodata} tmpdata
-	xbps-rindex -a $PWD/pkgB-0.1_1.${arch}.xbps
+	xbps-rindex --stage -a $PWD/pkgB-0.1_1.${arch}.xbps
 	atf_check_equal $? 0
 	cd ..
+	xbps-repodb --index some_repo other_repo
+	atf_check_equal $? 0
 	atf_check_equal "$(xbps-query --repository=some_repo -p pkgver commA)b" commA-1.0_1b
 	atf_check_equal "$(xbps-query --repository=some_repo -p pkgver lib)b" lib-1.0_1b
 	atf_check_equal "$(xbps-query --repository=other_repo -p pkgver lib)b" b
-	cp some_repo/${repodata} some_repo/${stagedata}
-	mv other_repo/tmpdata other_repo/${stagedata}
+	cd other_repo
+	xbps-rindex --stage -a $PWD/*.xbps
+	atf_check_equal $? 0
+	cd ..
 	xbps-repodb --index some_repo other_repo
 	atf_check_equal $? 0
 	rm some_repo/${stagedata} other_repo/${stagedata}
