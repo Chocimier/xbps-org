@@ -158,8 +158,8 @@ library_advanced_body() {
 	atf_check_equal x$? x0
 	xbps-rindex -a $PWD/*.xbps
 	atf_check_equal c$? c0
-	# xbps-repodb --index
-	# atf_check_equal $? 0
+	xbps-repodb --index $PWD
+	atf_check_equal $? 0
 	mv $stagedata stagedata.moved # xbps-query reads stagedata
 	#fails here
 	atf_check_equal "$(xbps-query --repository=. -p pkgver lib)" lib-1.0_1
