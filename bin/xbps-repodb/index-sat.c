@@ -260,8 +260,7 @@ load_repo(struct repos_group_t *group, struct xbps_repo *current_repo, enum sour
 			package_init(&new_node->packages[source], pkg, repo_serial);
 			HASH_ADD_KEYPTR(hh, group->nodes, pkgname, strlen(pkgname), new_node);
 		} else if (existing_package->pkgver) {
-			const char *pkgver = NULL;
-			xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &pkgver);
+			const char *pkgver = xbps_string_cstring_nocopy(xbps_dictionary_get(pkg, "pkgver"));
 			if (xbps_pkg_version_order(existing_package->dict, pkg) >= 0) {
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
 				    existing_package->pkgver, group->repos[existing_package->repo][source].repo->uri,
@@ -350,10 +349,9 @@ build_group(struct repos_group_t *group) {
 
 			shlib_provides = xbps_dictionary_get(curr_package->dict, "shlib-provides");
 			for (unsigned int i = 0; i < xbps_array_count(shlib_provides); i++) {
-				const char *shlib = NULL;
+				const char *shlib = xbps_string_cstring_nocopy(xbps_array_get(shlib_provides, i));
 				xbps_array_t providers;
 
-				xbps_array_get_cstring_nocopy(shlib_provides, i, &shlib);
 				providers = get_possibly_new_array(group->shlib_providers, shlib);
 				if (!providers) {
 					return ENOMEM;
@@ -363,12 +361,11 @@ build_group(struct repos_group_t *group) {
 
 			provides = xbps_dictionary_get(curr_package->dict, "provides");
 			for (unsigned int i = 0; i < xbps_array_count(provides); i++) {
-				const char *virtual = NULL;
+				const char *virtual = xbps_string_cstring_nocopy(xbps_array_get(provides, i));
 				xbps_dictionary_t providers;
 				char virtual_pkgname[XBPS_NAME_SIZE] = {0};
 				bool ok = false;
 
-				xbps_array_get_cstring_nocopy(provides, i, &virtual);
 				ok = xbps_pkg_name(virtual_pkgname, sizeof virtual_pkgname, virtual);
 				if (ok) {
 					xbps_dbg_printf(group->xhp, "virtual '%s' (%s) provided by '%s'\n", virtual_pkgname, virtual, curr_node->pkgname);
@@ -474,8 +471,7 @@ generate_constraints_shlib_requires(struct repos_group_t *group, PicoSAT* solver
 
 	shlib_requires = xbps_dictionary_get(curr_package->dict, "shlib-requires");
 	for (unsigned int i = 0; i < xbps_array_count(shlib_requires); i++) {
-		const char *shlib = NULL;
-		xbps_array_get_cstring_nocopy(shlib_requires, i, &shlib);
+		const char *shlib = xbps_string_cstring_nocopy(xbps_array_get(shlib_requires, i));
 		if (print_clauses) {
 			char *clause = xbps_xasprintf("%s → %s", curr_package->pkgver, shlib);
 			add_text_clause(group, clause, 1);
@@ -492,13 +488,12 @@ generate_constraints_depends(struct repos_group_t *group, PicoSAT* solver, bool 
 
 	run_depends = xbps_dictionary_get(curr_package->dict, "run_depends");
 	for (unsigned int i = 0; i < xbps_array_count(run_depends); i++) {
-		const char *deppattern = NULL;
+		const char *deppattern = xbps_string_cstring_nocopy(xbps_array_get(run_depends, i));
 		char *clause = NULL;
 		char *clause_part = NULL;
 		char depname[XBPS_NAME_SIZE];
 		bool ok = false;
 
-		xbps_array_get_cstring_nocopy(run_depends, i, &deppattern);
 		ok = xbps_pkgpattern_name(depname, sizeof depname, deppattern);
 		if (!ok) {
 			ok = xbps_pkg_name(depname, sizeof depname, deppattern);
@@ -663,10 +658,9 @@ generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver, 
 			char *clause_part = NULL;
 			int pv_idx = 0;
 			int copies_count = 0;
-			bool dummy_bool = false;
 			int outer_virtual_variable = variable_virtual_package(outer_virtual);
 
-			if (xbps_dictionary_get_bool(processed_pkgvers, outer_virtual, &dummy_bool)) {
+			if (xbps_bool_true(xbps_dictionary_get(processed_pkgvers, outer_virtual))) {
 				continue;
 			}
 			// virtual package on left side + providers + terminator
@@ -737,17 +731,15 @@ generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver
 		}
 		provider_variables[pv_idx++] = -shlib_variable;
 		for (unsigned int i = 0; i < xbps_array_count(providers); ++i) {
-			const char *provider = NULL;
-			int provider_variable;
+			const char *provider = xbps_string_cstring_nocopy(xbps_array_get(providers, i));
+			int provider_variable = variable_real_package(provider);
 
-			xbps_array_get_cstring_nocopy(providers, i, &provider);
 			if (print_clauses) {
 				clause_part = clause;
 				clause = xbps_xasprintf("%s%s ∨ ", clause_part, provider);
 				free(clause_part);
 				++copies_count;
 			}
-			provider_variable = variable_real_package(provider);
 			provider_variables[pv_idx++] = provider_variable;
 			picosat_add_arg(solver, -provider_variable, shlib_variable, 0);
 		}
@@ -808,9 +800,7 @@ explain_inconsistency(struct repos_group_t *group) {
 	fprintf(stderr, "Inconsistent clauses:\n");
 	for (int i = 0; i < picosat_added_original_clauses(solver); ++i) {
 		if (picosat_coreclause(solver, i)) {
-			const char *clause = NULL;
-			xbps_array_get_cstring_nocopy(group->text_clauses, i, &clause);
-			fprintf(stderr, " %s\n", clause);
+			fprintf(stderr, " %s\n", xbps_string_cstring_nocopy(xbps_array_get(group->text_clauses, i)));
 		}
 	}
 exit:
