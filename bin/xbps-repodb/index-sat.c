@@ -94,6 +94,7 @@ struct repos_group_t {
 	struct clause *clauses_last;
 	xbps_dictionary_t processed_providers;
 	struct xbps_handle *xhp;
+	bool explaining_pass;
 };
 
 static struct hash_str_holder_t *owned_strings_container = NULL;
@@ -249,7 +250,7 @@ clause_print(struct clause *clause, FILE *f) {
 }
 
 static void
-clause_add(struct repos_group_t *group, PicoSAT *solver, struct clause *clause, int length, bool print_clauses) {
+clause_add(struct repos_group_t *group, PicoSAT *solver, struct clause *clause, int length) {
 	clause->literals[length] = 0;
 	if (clause->type == CLAUSE_TYPE_IMPLICATION || clause->type == CLAUSE_TYPE_EQUIVALENCE) {
 		picosat_add(solver, -clause->literals[0]);
@@ -267,16 +268,18 @@ clause_add(struct repos_group_t *group, PicoSAT *solver, struct clause *clause, 
 			++clause->backing_clauses;
 		}
 	}
-	if (print_clauses) {
-		clause_print(clause, stderr);
-		free(clause);
-	} else {
+	if (group->explaining_pass) {
 		if (group->clauses) {
 			group->clauses_last->next = clause;
 			group->clauses_last = clause;
 		} else {
 			group->clauses = group->clauses_last = clause;
 		}
+	} else {
+		if (group->xhp->flags & XBPS_FLAG_DEBUG) {
+			clause_print(clause, stderr);
+		}
+		free(clause);
 	}
 }
 
@@ -493,7 +496,7 @@ exit:
 }
 
 static void
-generate_constraints_add_update_remove(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, bool explaining, struct node_t *curr_node)
+generate_constraints_add_update_remove(struct repos_group_t *group, PicoSAT* solver, struct node_t *curr_node)
 {
 	const char *curr_public_pkgver = curr_node->packages[SOURCE_PUBLIC].pkgver;
 	const char *curr_stage_pkgver = curr_node->packages[SOURCE_STAGE].pkgver;
@@ -519,45 +522,45 @@ generate_constraints_add_update_remove(struct repos_group_t *group, PicoSAT* sol
 			if (!basepkg_node || ((!basepkg_node->packages[SOURCE_PUBLIC].pkgver || strcmp(basepkg_node->packages[SOURCE_PUBLIC].pkgver, basepkg) != 0) && (!basepkg_node->packages[SOURCE_STAGE].pkgver || strcmp(basepkg_node->packages[SOURCE_STAGE].pkgver, basepkg) != 0))) {
 				struct clause *clause = clause_alloc(CLAUSE_TYPE_CERTAINTY, 1);
 				clause->literals[0] = -variable_curr;
-				clause_add(group, solver, clause, 1, print_clauses);
+				clause_add(group, solver, clause, 1);
 			} else {
 				struct clause *clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, 2);
 
 				curr_node->base_node = basepkg_node;
 				clause->literals[0] = variable_curr;
 				clause->literals[1] = variable_real_package(basepkg);
-				clause_add(group, solver, clause, 2, print_clauses);
+				clause_add(group, solver, clause, 2);
 			}
 		}
 	} else if (curr_public_pkgver && curr_stage_pkgver) {
 		if (strcmp(curr_public_pkgver, curr_stage_pkgver) == 0) {
 			struct clause *clause = clause_alloc(CLAUSE_TYPE_CERTAINTY, 1);
 			clause->literals[0] = variable_real_package(curr_public_pkgver);
-			clause_add(group, solver, clause, 1, print_clauses);
+			clause_add(group, solver, clause, 1);
 		} else {
 			int public_variable = variable_real_package(curr_public_pkgver);
 			int stage_variable = variable_real_package(curr_stage_pkgver);
 			struct clause *clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, 2);
 			clause->literals[0] = public_variable;
 			clause->literals[1] = -stage_variable;
-			clause_add(group, solver, clause, 2, print_clauses);
-			if (!explaining) {
+			clause_add(group, solver, clause, 2);
+			if (!group->explaining_pass) {
 				picosat_assume(solver, stage_variable);
 			}
 		}
 	} else if (curr_public_pkgver) {
-		if (!explaining) {
+		if (!group->explaining_pass) {
 			picosat_assume(solver, -variable_real_package(curr_public_pkgver));
 		}
 	} else if (curr_stage_pkgver) {
-		if (!explaining) {
+		if (!group->explaining_pass) {
 			picosat_assume(solver, variable_real_package(curr_stage_pkgver));
 		}
 	}
 }
 
 static void
-generate_constraints_shlib_requires(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct package_t *curr_package)
+generate_constraints_shlib_requires(struct repos_group_t *group, PicoSAT* solver, struct package_t *curr_package)
 {
 	xbps_array_t shlib_requires = NULL;
 
@@ -567,12 +570,12 @@ generate_constraints_shlib_requires(struct repos_group_t *group, PicoSAT* solver
 		struct clause *clause = clause_alloc(CLAUSE_TYPE_IMPLICATION, 2);
 		clause->literals[0] = variable_real_package(curr_package->pkgver);
 		clause->literals[1] = variable_shlib(shlib);
-		clause_add(group, solver, clause, 2, print_clauses);
+		clause_add(group, solver, clause, 2);
 	}
 }
 
 static int
-generate_constraints_depends(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct package_t *curr_package)
+generate_constraints_depends(struct repos_group_t *group, PicoSAT* solver, struct package_t *curr_package)
 {
 	xbps_array_t run_depends = NULL;
 	int rv = 0;
@@ -632,13 +635,13 @@ generate_constraints_depends(struct repos_group_t *group, PicoSAT* solver, bool 
 			}
 		}
 		clause->label = owned_string(deppattern);
-		clause_add(group, solver, clause, pv_idx, print_clauses);
+		clause_add(group, solver, clause, pv_idx);
 	}
 	return rv;
 }
 
 static void
-generate_constraints_virtual_or_real(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct node_t *curr_node, struct package_t *curr_package)
+generate_constraints_virtual_or_real(struct repos_group_t *group, PicoSAT* solver, struct node_t *curr_node, struct package_t *curr_package)
 {
 	xbps_dictionary_t providers = xbps_dictionary_get(group->virtual_providers, curr_node->pkgname);
 	// virtual package on left side + real package on right side + providers
@@ -662,11 +665,11 @@ generate_constraints_virtual_or_real(struct repos_group_t *group, PicoSAT* solve
 		}
 		xbps_object_iterator_release(iter);
 	}
-	clause_add(group, solver, clause, pv_idx, print_clauses);
+	clause_add(group, solver, clause, pv_idx);
 }
 
 static void
-generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver, bool print_clauses)
+generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver)
 {
 	xbps_object_iterator_t virtual_pkgs_iter = xbps_dictionary_iterator(group->virtual_providers);
 	xbps_dictionary_keysym_t virtual_pkgs_keysym = NULL;
@@ -713,7 +716,7 @@ generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver, 
 				}
 			}
 			xbps_object_iterator_release(providers_inner_iter);
-			clause_add(group, solver, clause, pv_idx, print_clauses);
+			clause_add(group, solver, clause, pv_idx);
 			xbps_dictionary_set_bool(processed_pkgvers, outer_virtual, true);
 		}
 		xbps_object_iterator_release(providers_outer_iter);
@@ -723,7 +726,7 @@ generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver, 
 }
 
 static void
-generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, bool print_clauses, struct package_t *curr_package)
+generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, struct package_t *curr_package)
 {
 	xbps_array_t shlib_requires = xbps_dictionary_get(curr_package->dict, "shlib-requires");
 
@@ -743,30 +746,29 @@ generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver
 			const char *provider = xbps_string_cstring_nocopy(xbps_array_get(providers, i));
 			clause->literals[pv_idx++] = variable_real_package(provider);
 		}
-		clause_add(group, solver, clause, pv_idx, print_clauses);
+		clause_add(group, solver, clause, pv_idx);
 	}
 }
 
 static int
-generate_constraints(struct repos_group_t *group, PicoSAT* solver, bool explaining)
+generate_constraints(struct repos_group_t *group, PicoSAT* solver)
 {
 	int rv = 0;
-	bool print_clauses = explaining || (group->xhp->flags & XBPS_FLAG_DEBUG);
 	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
-		generate_constraints_add_update_remove(group, solver, print_clauses, explaining, curr_node);
+		generate_constraints_add_update_remove(group, solver, curr_node);
 		for (enum source source = SOURCE_PUBLIC; source <= SOURCE_STAGE; ++source) {
 			struct package_t *curr_package = &curr_node->packages[source];
 
 			if (!curr_package->pkgver) {
 				continue;
 			}
-			generate_constraints_shlib_requires(group, solver, print_clauses, curr_package);
-			generate_constraints_shlib_provides(group, solver, print_clauses, curr_package);
-			rv |= generate_constraints_depends(group, solver, print_clauses, curr_package);
-			generate_constraints_virtual_or_real(group, solver, print_clauses, curr_node, curr_package);
+			generate_constraints_shlib_requires(group, solver, curr_package);
+			generate_constraints_shlib_provides(group, solver, curr_package);
+			rv |= generate_constraints_depends(group, solver, curr_package);
+			generate_constraints_virtual_or_real(group, solver, curr_node, curr_package);
 		}
 	}
-	generate_constraints_virtual_pure(group, solver, print_clauses);
+	generate_constraints_virtual_pure(group, solver);
 	return rv;
 }
 
@@ -780,7 +782,8 @@ explain_inconsistency(struct repos_group_t *group) {
 	int clause_number = 0;
 
 	picosat_enable_trace_generation(solver);
-	rv = generate_constraints(group, solver, true);
+	group->explaining_pass = true;
+	rv = generate_constraints(group, solver);
 	if (rv) {
 		fprintf(stderr, "Failed to generate constraints for explaining: %s\n", strerror(rv));
 		goto exit;
@@ -811,7 +814,7 @@ update_repodata(struct repos_group_t *group) {
 	const int *correcting = NULL;
 	PicoSAT *solver = picosat_init();
 
-	rv = generate_constraints(group, solver, false);
+	rv = generate_constraints(group, solver);
 	if (rv) {
 		fprintf(stderr, "Failed to generate constraints: %s\n", strerror(rv));
 		goto exit;
