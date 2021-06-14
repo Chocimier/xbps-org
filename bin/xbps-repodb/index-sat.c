@@ -702,13 +702,14 @@ generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver)
 			xbps_object_iterator_t providers_inner_iter = NULL;
 			xbps_dictionary_keysym_t providers_inner_keysym = NULL;
 			// virtual package on left side + providers
-			struct clause *clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, 1 + xbps_dictionary_count(providers));
+			struct clause *clause = NULL;
 			int pv_idx = 0;
 			int outer_virtual_variable = variable_virtual_package(outer_virtual);
 
 			if (xbps_bool_true(xbps_dictionary_get(processed_pkgvers, outer_virtual))) {
 				continue;
 			}
+			clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, 1 + xbps_dictionary_count(providers));
 			clause->literals[pv_idx++] = outer_virtual_variable;
 			providers_inner_iter = xbps_dictionary_iterator(providers);
 			while ((providers_inner_keysym = xbps_object_iterator_next(providers_inner_iter))) {
@@ -737,12 +738,13 @@ generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver
 		const char *shlib = xbps_string_cstring_nocopy(xbps_array_get(shlib_requires, j));
 		xbps_array_t providers = xbps_dictionary_get(group->shlib_providers, shlib);
 		// library on left side + providers
-		struct clause *clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, xbps_array_count(providers) + 1);
+		struct clause *clause = NULL;
 		int pv_idx = 0;
 
 		if (xbps_dictionary_get(group->processed_providers, shlib)) {
 			continue;
 		}
+		clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, xbps_array_count(providers) + 1);
 		xbps_dictionary_set_bool(group->processed_providers, shlib, true);
 		clause->literals[pv_idx++] = variable_shlib(shlib);
 		for (unsigned int i = 0; i < xbps_array_count(providers); ++i) {
