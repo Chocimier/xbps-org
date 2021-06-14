@@ -20,8 +20,11 @@ enum source {
 };
 
 enum clause_type {
-	CLAUSE_TYPE_CERTAINTY, // length has to be 1
+	// length has to be 1
+	CLAUSE_TYPE_CERTAINTY,
+	// first literal implies disjunction of rest
 	CLAUSE_TYPE_IMPLICATION,
+	// first literal is equivalent to disjunction of rest
 	CLAUSE_TYPE_EQUIVALENCE,
 };
 
@@ -253,6 +256,7 @@ static void
 clause_add(struct repos_group_t *group, PicoSAT *solver, struct clause *clause, int length) {
 	clause->literals[length] = 0;
 	if (clause->type == CLAUSE_TYPE_IMPLICATION || clause->type == CLAUSE_TYPE_EQUIVALENCE) {
+		// 1. p → (q ∨ r) == ¬p ∨ q ∨ r
 		picosat_add(solver, -clause->literals[0]);
 		picosat_add_lits(solver, clause->literals + 1);
 	} else {
@@ -261,7 +265,6 @@ clause_add(struct repos_group_t *group, PicoSAT *solver, struct clause *clause, 
 	clause->backing_clauses = 1;
 	if (clause->type == CLAUSE_TYPE_EQUIVALENCE) {
 		// p ↔ (q ∨ r) == (1.) ∧ (2.)
-		// 1. p → (q ∨ r) == ¬p ∨ q ∨ r
 		// 2. (q ∨ r) → p == (q → p) ∧ (r → p) == (¬q ∨ p) ∧ (¬r ∨ p)
 		for (int *lit = clause->literals + 1; *lit; ++lit) {
 			picosat_add_arg(solver, -*lit, clause->literals[0], 0);
