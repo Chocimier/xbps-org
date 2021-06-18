@@ -95,7 +95,6 @@ struct repos_group_t {
 	struct repo_t (*repos)[2];
 	struct clause *clauses;
 	struct clause *clauses_last;
-	xbps_dictionary_t processed_providers;
 	struct xbps_handle *xhp;
 	bool explaining_pass;
 };
@@ -335,7 +334,6 @@ repo_group_init(struct repos_group_t *group, struct xbps_handle *xhp, int repos_
 	group->repos = calloc(group->repos_count, sizeof *group->repos);
 	group->clauses = NULL;
 	group->clauses_last = NULL;
-	group->processed_providers = xbps_dictionary_create();
 	group->xhp = xhp;
 }
 
@@ -353,7 +351,6 @@ repo_group_release(struct repos_group_t *group) {
 		}
 	}
 	free(group->repos);
-	xbps_object_release(group->processed_providers);
 }
 
 static int
@@ -730,7 +727,7 @@ generate_constraints_virtual_pure(struct repos_group_t *group, PicoSAT* solver)
 }
 
 static void
-generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, struct package_t *curr_package)
+generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver, struct package_t *curr_package, xbps_dictionary_t processed_providers)
 {
 	xbps_array_t shlib_requires = xbps_dictionary_get(curr_package->dict, "shlib-requires");
 
@@ -741,11 +738,11 @@ generate_constraints_shlib_provides(struct repos_group_t *group, PicoSAT* solver
 		struct clause *clause = NULL;
 		int pv_idx = 0;
 
-		if (xbps_dictionary_get(group->processed_providers, shlib)) {
+		if (xbps_dictionary_get(processed_providers, shlib)) {
 			continue;
 		}
 		clause = clause_alloc(CLAUSE_TYPE_EQUIVALENCE, xbps_array_count(providers) + 1);
-		xbps_dictionary_set_bool(group->processed_providers, shlib, true);
+		xbps_dictionary_set_bool(processed_providers, shlib, true);
 		clause->literals[pv_idx++] = variable_shlib(shlib);
 		for (unsigned int i = 0; i < xbps_array_count(providers); ++i) {
 			const char *provider = xbps_string_cstring_nocopy(xbps_array_get(providers, i));
@@ -759,6 +756,8 @@ static int
 generate_constraints(struct repos_group_t *group, PicoSAT* solver)
 {
 	int rv = 0;
+	xbps_dictionary_t processed_providers = xbps_dictionary_create();
+
 	for (struct node_t *curr_node = group->nodes; curr_node; curr_node = curr_node->hh.next) {
 		generate_constraints_add_update_remove(group, solver, curr_node);
 		for (enum source source = SOURCE_PUBLIC; source <= SOURCE_STAGE; ++source) {
@@ -768,12 +767,13 @@ generate_constraints(struct repos_group_t *group, PicoSAT* solver)
 				continue;
 			}
 			generate_constraints_shlib_requires(group, solver, curr_package);
-			generate_constraints_shlib_provides(group, solver, curr_package);
+			generate_constraints_shlib_provides(group, solver, curr_package, processed_providers);
 			rv |= generate_constraints_depends(group, solver, curr_package);
 			generate_constraints_virtual_or_real(group, solver, curr_node, curr_package);
 		}
 	}
 	generate_constraints_virtual_pure(group, solver);
+	xbps_object_release(processed_providers);
 	return rv;
 }
 
