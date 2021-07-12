@@ -97,6 +97,7 @@ struct repos_group_t {
 	struct clause *clauses_last;
 	struct xbps_handle *xhp;
 	bool explaining_pass;
+	bool pushed_out_packages;
 };
 
 static struct hash_str_holder_t *owned_strings_container = NULL;
@@ -337,6 +338,7 @@ repo_group_init(struct repos_group_t *group, struct xbps_handle *xhp, int repos_
 	group->clauses_last = NULL;
 	group->xhp = xhp;
 	group->explaining_pass = false;
+	group->pushed_out_packages = false;
 }
 
 static void
@@ -380,6 +382,7 @@ load_repo(struct repos_group_t *group, struct xbps_repo *current_repo, enum sour
 			HASH_ADD_KEYPTR(hh, group->nodes, pkgname, strlen(pkgname), new_node);
 		} else if (existing_package->pkgver) {
 			const char *pkgver = xbps_string_cstring_nocopy(xbps_dictionary_get(pkg, "pkgver"));
+			group->pushed_out_packages = true;
 			if (xbps_pkg_version_order(existing_package->dict, pkg) >= 0) {
 				fprintf(stderr, "'%s' from '%s' is about to push out '%s' from '%s'\n",
 				    existing_package->pkgver, group->repos[existing_package->repo][source].repo->uri,
@@ -887,6 +890,7 @@ static int
 write_repos(struct repos_group_t *group, const char *compression, char *repos[]) {
 	xbps_dictionary_t* dictionaries = NULL;
 	int rv = 0;
+	bool need_write = group->pushed_out_packages;
 
 	dictionaries = calloc(group->repos_count, sizeof *dictionaries);
 	if (!dictionaries) {
@@ -906,6 +910,7 @@ write_repos(struct repos_group_t *group, const char *compression, char *repos[])
 
 		if (node->source == SOURCE_NONE) {
 			if (node->packages[SOURCE_PUBLIC].pkgver) {
+				need_write = true;
 				printf("Removing '%s'\n", node->packages[SOURCE_PUBLIC].pkgver);
 			}
 			continue;
@@ -913,10 +918,13 @@ write_repos(struct repos_group_t *group, const char *compression, char *repos[])
 		package = &node->packages[node->source];
 		if (node->source == SOURCE_STAGE) {
 			if (!node->packages[SOURCE_PUBLIC].pkgver) {
+				need_write = true;
 				printf("Adding '%s'\n", package->pkgver);
 			} else if (!package->pkgver) {
+				need_write = true;
 				printf("Removing '%s'\n", node->packages[SOURCE_PUBLIC].pkgver);
 			} else if (strcmp(node->packages[SOURCE_PUBLIC].pkgver, package->pkgver) != 0) {
+				need_write = true;
 				printf("Updating from '%s' to '%s'\n", node->packages[SOURCE_PUBLIC].pkgver, package->pkgver);
 			}
 		}
@@ -925,8 +933,12 @@ write_repos(struct repos_group_t *group, const char *compression, char *repos[])
 			xbps_dbg_printf(group->xhp, "Putting %s (%s) into %s \n", node->pkgname, package->pkgver, repos[package->repo]);
 		}
 	}
-	for (int i = 0; i < group->repos_count; ++i) {
-		xbps_repodata_flush(group->xhp, repos[i], "repodata", dictionaries[i], group->repos[i][SOURCE_PUBLIC].meta, compression);
+	if (need_write) {
+		for (int i = 0; i < group->repos_count; ++i) {
+			xbps_repodata_flush(group->xhp, repos[i], "repodata", dictionaries[i], group->repos[i][SOURCE_PUBLIC].meta, compression);
+		}
+	} else {
+		xbps_dbg_printf(group->xhp, "No updates to write\n");
 	}
 exit:
 	for (int i = 0; i < group->repos_count; ++i) {
@@ -990,10 +1002,7 @@ index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *ar
 		goto exit;
 	}
 	rv = update_repodata(&group);
-	if (rv == EALREADY) {
-		// no updates to apply
-		rv = 0;
-	} else if (!rv) {
+	if (!rv) {
 		rv = write_repos(&group, compression, argv);
 	}
 exit:
