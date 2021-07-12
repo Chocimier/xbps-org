@@ -328,6 +328,7 @@ repo_group_purge_packages(struct repos_group_t *group) {
 
 static void
 repo_group_init(struct repos_group_t *group, struct xbps_handle *xhp, int repos_count) {
+	group->nodes = NULL;
 	group->shlib_providers = xbps_dictionary_create();
 	group->virtual_providers = xbps_dictionary_create();
 	group->repos_count = repos_count;
@@ -335,6 +336,7 @@ repo_group_init(struct repos_group_t *group, struct xbps_handle *xhp, int repos_
 	group->clauses = NULL;
 	group->clauses_last = NULL;
 	group->xhp = xhp;
+	group->explaining_pass = false;
 }
 
 static void
@@ -940,7 +942,7 @@ int
 index_repos(struct xbps_handle *xhp, const char *compression, int argc, char *argv[])
 {
 	int rv = 0;
-	struct repos_group_t group = {0};
+	struct repos_group_t group;
 
 	repo_group_init(&group, xhp, argc);
 	for (int i = 0; i < group.repos_count; ++i) {
